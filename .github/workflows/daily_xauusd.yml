@@ -1,0 +1,58 @@
+name: Daily XAUUSD Notifier
+
+on:
+  schedule:
+    # 22:30 UTC Sun-Thu = 05:30 WIB Mon-Fri. Always after the 17:00 New York
+    # close (21:00 UTC in US summer, 22:00 UTC in US winter). Sunday run covers
+    # the Monday candle.
+    - cron: "30 22 * * 0-4"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (do not send email; upload preview as artifact)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read        # Sprint 3 will raise this to `write` to commit the ledger
+
+concurrency:
+  group: xauusd-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sentinel
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
+
+      - name: Upload dry-run preview
+        if: ${{ inputs.dry_run == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-preview
+          path: out/

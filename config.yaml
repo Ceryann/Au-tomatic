@@ -1,0 +1,25 @@
+# XAUUSD Quant Sentinel - configuration
+# Locked decision: D1 candle boundary = 17:00 America/New_York
+# (matches the MT5 broker D1 open of the project owner).
+
+market:
+  primary_symbol: "XAUUSD=X"     # Spot gold (Yahoo)
+  futures_symbol: "GC=F"         # Fallback only; basis differs from spot
+  candle_cutoff_tz: "America/New_York"
+  candle_cutoff_hour: 17         # D1 candle opens/closes at 17:00 NY
+
+data:
+  history_days: 725              # Yahoo limits 1h data to ~730 days
+  min_sessions: 400              # minimum complete D1 candles required
+  min_bars_per_session: 12       # hourly bars; gold normally has ~23
+  max_stale_hours: 4             # newest hourly bar must be this fresh
+  max_abs_daily_return: 0.08     # |close/close-1| above this = warning
+  max_missing_weekdays: 15       # holidays tolerated before warning
+  retries: 4
+  backoff_seconds: 5             # exponential: 5, 10, 20, ...
+
+email:
+  subject_prefix: "[XAUUSD D1]"
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 465
+  display_tz: "Asia/Jakarta"     # WIB, for times shown in the email
