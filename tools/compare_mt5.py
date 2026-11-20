@@ -48,8 +48,9 @@ def read_mt5_csv(path: str) -> pd.DataFrame:
 
 def compare(bot: pd.DataFrame, mt5: pd.DataFrame, days: int = 30) -> dict:
     """Return diagnostics comparing bot candles with MT5 candles (bot - MT5)."""
-    joined = bot[["Open", "High", "Low", "Close"]].join(
-        mt5, how="inner", lsuffix="_bot", rsuffix="_mt5"
+    joined = pd.merge(
+        bot[["Open", "High", "Low", "Close"]], mt5,
+        left_index=True, right_index=True, how="inner", suffixes=("_bot", "_mt5"),
     ).tail(days)
     if joined.empty:
         raise ValueError("No overlapping dates between bot candles and the MT5 export.")
