@@ -270,6 +270,59 @@ def test_backtest_module_runs_and_reports_sane_numbers():
     assert any("Coverage" in line for line in rep.lines())
 
 
+def test_computation_report_shows_every_step_and_charts():
+    from src.report import build_report
+
+    cfg = fast_cfg()
+    b = bundle_at(T.NOW, T.hourly_until(T.NOW, seed=11), cfg)
+    fc = forecast_day(b, None, cfg, explain=True)
+    html_doc, text = build_report(b, fc, cfg)
+    for title in ("Kalman", "Hidden Markov", "Monte Carlo", "Volatilitas dan drift", "Lompatan"):
+        assert title in html_doc and title in text, title
+    assert html_doc.count("data:image/png;base64,") == 5          # trend, regimes, profile, paths, dist
+    assert "Ekstrapolasi 1 hari" in text
+    assert " nan" not in text.lower() and "None" not in text
+    # consistency: report numbers equal the forecast numbers
+    assert f"{fc.close_q[0]:,.2f}" in text and f"{fc.diag['kalman']['velocity']:+.2f}" in text
+    # without explain=True a report cannot be built
+    try:
+        build_report(b, forecast_day(b, None, cfg), cfg)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_explain_mode_does_not_change_the_numbers():
+    cfg = fast_cfg()
+    b = bundle_at(T.NOW, T.hourly_until(T.NOW, seed=11), cfg)
+    plain = forecast_day(b, None, cfg)
+    explained = forecast_day(b, None, cfg, explain=True)
+    assert plain.close_q == explained.close_q and plain.high_q == explained.high_q and plain.p_up == explained.p_up
+
+
+def test_report_failure_never_replaces_the_forecast_email():
+    """Regression: a missing matplotlib used to turn a good forecast into an error email."""
+    import tempfile
+
+    import main as main_mod
+
+    cfg_hourly = T.hourly_until(T.NOW, seed=11)
+    saved = sys.modules.get("src.report")
+    sys.modules["src.report"] = None                      # importing it now raises ImportError
+    try:
+        with tempfile.TemporaryDirectory() as tmp, T.FakeYahoo(lambda s, i, d: cfg_hourly):
+            rc = main_mod.main(["--dry-run", "--explain", "--no-macro", "--out", tmp,
+                                "--now", "2026-01-13T22:30:00Z"])
+            preview = (Path(tmp) / "preview.txt").read_text(encoding="utf-8")
+    finally:
+        if saved is None:
+            sys.modules.pop("src.report", None)
+        else:
+            sys.modules["src.report"] = saved
+    assert rc == 0
+    assert "TIDAK TERSEDIA" not in preview and "Kisaran close" in preview
+
+
 # -------------------------------------------------------------------- email
 def test_forecast_email_renders_cleanly():
     cfg = fast_cfg()

@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .data_fetcher import DataBundle, DataError, session_end_utc
-from .signal_and_regime import build_features, fit_regime_model, kalman_trend
+from .signal_and_regime import build_features, fit_regime_model, kalman_filtered_path, kalman_trend
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ class Forecast:
     avg_range_5: float = 0.0           # mean High-Low of the last 5 complete sessions ($)
     avg_range_20: float = 0.0          # same over 20 sessions ($)
     notes: list[str] = field(default_factory=list)
+    diag: dict = field(default_factory=dict)      # every intermediate number (for the report)
 
 
 # --------------------------------------------------------------------------
@@ -168,6 +169,7 @@ def simulate_day(
     sig_j: float,
     n_paths: int,
     rng: np.random.Generator,
+    return_paths: bool = False,
 ) -> dict[str, np.ndarray]:
     """Simulate the remaining session. Returns arrays (price units) of close/high/low
     measured over the simulated part only (realised high/low are merged by the caller).
@@ -178,6 +180,7 @@ def simulate_day(
     x = np.zeros(n_paths)
     run_max = np.zeros(n_paths)
     run_min = np.zeros(n_paths)
+    path_log = [x.copy()] if return_paths else None
     for wj in weights:
         z = rng.standard_normal(n_paths)
         a = x
@@ -193,11 +196,16 @@ def simulate_day(
         x = b + jump
         run_max = np.maximum(run_max, np.maximum(seg_max, x))
         run_min = np.minimum(run_min, np.minimum(seg_min, x))
-    return {
+        if return_paths:
+            path_log.append(x.copy())
+    out = {
         "close": p0 * np.exp(x),
         "high": p0 * np.exp(run_max),
         "low": p0 * np.exp(run_min),
     }
+    if return_paths:
+        out["paths"] = p0 * np.exp(np.stack(path_log, axis=1).astype(np.float32))   # n_paths x (n_seg+1)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -208,6 +216,7 @@ def forecast_day(
     macro: Optional[pd.DataFrame],
     cfg: dict,
     event_today: bool = False,
+    explain: bool = False,
 ) -> Forecast:
     m = cfg["model"]
     tz = cfg["market"]["candle_cutoff_tz"]
@@ -278,7 +287,8 @@ def forecast_day(
     # ---- Monte Carlo
     seed = int(bundle.target_session.strftime("%Y%m%d"))
     rng = np.random.default_rng(seed)
-    sim = simulate_day(p0, weights, sigma_diff, mu_d, lam, mu_j, sig_j, int(m["n_paths"]), rng)
+    sim = simulate_day(p0, weights, sigma_diff, mu_d, lam, mu_j, sig_j, int(m["n_paths"]), rng,
+                       return_paths=explain)
     close_s = sim["close"]
     high_s = sim["high"] if realized_high is None else np.maximum(sim["high"], realized_high)
     low_s = sim["low"] if realized_low is None else np.minimum(sim["low"], realized_low)
@@ -299,6 +309,47 @@ def forecast_day(
     vol_ratio = float(sigma_d / np.mean(recent)) if len(recent) else 1.0
     vol_label = "lebih lebar" if vol_ratio > 1.15 else "lebih sempit" if vol_ratio < 0.87 else "normal"
 
+    mu_raw = dcfg["k_regime"] * mu_regime + dcfg["k_kalman"] * mu_kal
+    diag = {
+        "n_returns": int(len(r)),
+        "kalman": {
+            "level": kal.level, "velocity": kal.velocity, "se": kal.velocity_se, "z": kal.z,
+            "q_level": kal.q_level, "q_slope": kal.q_slope, "last_close": float(close.iloc[-1]),
+            "extrapolated_next": kal.level + kal.velocity,
+        },
+        "regime": {
+            "names": regime.names, "probs_today": [float(x) for x in regime.probs_today],
+            "probs_next": [float(x) for x in regime.probs_next], "mu": [float(x) for x in regime.mu],
+            "sigma": [float(x) for x in regime.sigma], "transmat": regime.transmat.tolist(),
+            "loglik": float(regime.loglik), "n_obs": int(regime.n_obs), "features": list(used),
+        },
+        "vol": {
+            "sigma_regime": sigma_regime, "sigma_ewma": float(ewma[-1]), "rv_ref": rv_ref,
+            "w_regime": vcfg["w_regime"], "sigma_raw": float(sigma_raw), "sigma_d": sigma_d,
+        },
+        "drift": {
+            "mu_regime": mu_regime, "mu_kalman": mu_kal, "k_regime": dcfg["k_regime"],
+            "k_kalman": dcfg["k_kalman"], "mu_raw": float(mu_raw),
+            "cap": float(dcfg["cap_sigma_mult"] * sigma_d), "mu_d": mu_d,
+        },
+        "jumps": {
+            "lam0": lam0, "mu_j": mu_j, "sig_j": sig_j, "mult": mult, "lam": lam,
+            "sigma_diff": sigma_diff, "robust_sigma": float(robust_sigma(r.values)),
+        },
+        "intraday": {
+            "profile": [float(x) for x in profile], "now_eff": str(now_eff), "end": str(end_utc),
+            "n_segments": int(len(weights)), "remaining": float(weights.sum()),
+        },
+        "p0": p0,
+    }
+    if explain:
+        lev, vel = kalman_filtered_path(close, kal.q_level, kal.q_slope)
+        diag["arrays"] = {
+            "close": close_s, "high": high_s, "low": low_s, "paths": sim["paths"],
+            "weights": weights, "hist_close": close, "kalman_level": lev, "kalman_velocity": vel,
+            "gamma": regime.gamma, "gamma_dates": regime.dates,
+        }
+
     return Forecast(
         open_price=open_price, ref_price=p0, open_known=bundle.session_open is not None,
         close_q=qt(close_s), high_q=qt(high_s), low_q=qt(low_s),
@@ -310,5 +361,5 @@ def forecast_day(
         realized_high=realized_high, realized_low=realized_low,
         avg_range_5=float((bundle.candles['High'] - bundle.candles['Low']).tail(5).mean()),
         avg_range_20=float((bundle.candles['High'] - bundle.candles['Low']).tail(20).mean()),
-        notes=notes,
+        notes=notes, diag=diag,
     )

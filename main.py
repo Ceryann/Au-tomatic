@@ -8,6 +8,7 @@ Usage
     python main.py --dry-run --data-check                 # only the Sprint 1 data check
     python main.py --dry-run --no-macro                   # skip DXY/US10Y features
     python main.py --dry-run --event                      # simulate a high-impact event day
+    python main.py --dry-run --explain                    # also write out/report.html (every computation step)
 
 Environment variables (GitHub Secrets in CI):
     TWELVEDATA_API_KEY                         (spot XAU/USD; without it the futures fallback is used)
@@ -52,6 +53,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data-check", action="store_true", help="Only run the Sprint 1 data check email.")
     p.add_argument("--no-macro", action="store_true", help="Skip DXY / US10Y features.")
     p.add_argument("--event", action="store_true", help="Treat today as a high-impact event day.")
+    p.add_argument("--explain", action="store_true", help="Also write out/report.html and out/report.txt.")
     return p.parse_args(argv)
 
 
@@ -72,12 +74,26 @@ def main(argv=None) -> int:
             if not args.no_macro:
                 macro, macro_notes = fetch_macro_daily(cfg, bundle.now_utc)
                 bundle.warnings.extend(macro_notes)
-            fc = forecast_day(bundle, macro, cfg, event_today=args.event)
+            fc = forecast_day(bundle, macro, cfg, event_today=args.event, explain=args.explain)
             log.info(
                 "Forecast: close %.2f-%.2f | P(up) %.0f%% | regime %s",
                 fc.close_q[0], fc.close_q[2], 100 * fc.p_up, fc.regime,
             )
             subject, html_body, text_body = build_forecast_email(bundle, fc, cfg)
+            if args.explain:
+                # An optional extra must never block the forecast email itself.
+                try:
+                    from src.report import build_report
+
+                    rep_html, rep_txt = build_report(bundle, fc, cfg)
+                    out_dir = Path(args.out)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    (out_dir / "report.html").write_text(rep_html, encoding="utf-8")
+                    (out_dir / "report.txt").write_text(rep_txt, encoding="utf-8")
+                    log.info("Computation report written to %s", out_dir / "report.html")
+                except Exception as exc:  # noqa: BLE001
+                    hint = " Run: python -m pip install -r requirements.txt" if isinstance(exc, ImportError) else ""
+                    log.warning("Computation report skipped (%s: %s).%s", type(exc).__name__, exc, hint)
     except DataError as exc:
         failed = True
         log.error("Pipeline failed: %s", exc)

@@ -105,6 +105,26 @@ def kalman_trend(close: pd.Series) -> KalmanResult:
     )
 
 
+def kalman_filtered_path(close: pd.Series, q_level: float, q_slope: float) -> tuple[np.ndarray, np.ndarray]:
+    """Filtered level and velocity for every day (for plotting / explanation only)."""
+    y = np.asarray(close, dtype=float)
+    n = len(y)
+    lev, vel = np.empty(n), np.empty(n)
+    l, s = float(y[0]), 0.0
+    a, b, d = 1e3, 0.0, 1e3
+    lev[0], vel[0] = l, s
+    for t in range(1, n):
+        lp, sp = l + s, s
+        a_p, b_p, d_p = a + 2 * b + d + q_level, b + d, d + q_slope
+        f = a_p + 1.0
+        v = y[t] - lp
+        k1, k2 = a_p / f, b_p / f
+        l, s = lp + k1 * v, sp + k2 * v
+        a, b, d = a_p - a_p * a_p / f, b_p - a_p * b_p / f, d_p - b_p * b_p / f
+        lev[t], vel[t] = l, s
+    return lev, vel
+
+
 # --------------------------------------------------------------------------
 # HMM regimes
 # --------------------------------------------------------------------------
@@ -119,6 +139,8 @@ class RegimeResult:
     loglik: float
     n_obs: int
     features: list[str]
+    gamma: np.ndarray | None = None      # state probabilities for every day
+    dates: pd.Index | None = None
 
     @property
     def current_name(self) -> str:
@@ -178,5 +200,5 @@ def fit_regime_model(
         names=map_regimes(hmm.means_, hmm.vars_),
         probs_today=today, probs_next=nxt, mu=mu, sigma=sigma,
         transmat=hmm.transmat_, loglik=hmm.loglik_, n_obs=len(X),
-        features=list(features.columns),
+        features=list(features.columns), gamma=hmm.gamma_, dates=features.index,
     )

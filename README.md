@@ -71,6 +71,15 @@ Opsi `main.py`:
 | `--data-check` | hanya email tes data (Sprint 1) |
 | `--no-macro` | tanpa fitur DXY/US10Y |
 | `--event` | anggap hari ini hari event high-impact (kisaran dilebarkan) |
+| `--explain` | tulis juga `out/report.html` (laporan perhitungan lengkap dengan grafik) dan `report.txt` |
+
+## Melihat perhitungan komputasinya
+
+```powershell
+python main.py --dry-run --explain
+```
+
+Buka `out\report.html`. Isinya setiap langkah dengan angka dan grafik: ekstrapolasi tren Kalman (kecepatan, galat baku, z, tebakan satu hari), probabilitas dan matriks transisi rezim HMM, campuran volatilitas dan drift beserta batasnya, parameter lompatan, profil volatilitas per jam, dan 10.000 jalur Monte Carlo beserta sebarannya.
 
 ## Uji kualitas model di data asli (WAJIB sebelum dipercaya)
 
@@ -84,6 +93,8 @@ Memakai riwayat Twelve Data asli (3 sampai 4 credits, ± 1 menit). Model dijalan
 - **Pinball gain vs baseline positif** berarti model mengalahkan random walk sederhana. Sekitar 0 berarti setara. Negatif berarti model lebih buruk, dan itu temuan penting.
 - **Direction Brier mendekati 0,25** berarti tidak ada kemampuan menebak arah. Itu **normal** untuk emas harian.
 - Tabel per sesi tersimpan di `out/backtest_table.csv`.
+- **Uji ekstrapolasi tren murni** (tanpa pengecilan drift), lalu bandingkan dengan hasil bawaan:
+  `python tools/backtest.py --sessions 120 --set model.drift.k_kalman=1 --set model.drift.cap_sigma_mult=10`
 
 ## Validasi terhadap chart MT5
 
@@ -105,8 +116,9 @@ src/hmm.py                  # Gaussian HMM (numpy, tanpa hmmlearn)
 src/signal_and_regime.py    # Kalman local linear trend, fitur, pemetaan rezim
 src/quant_engine.py         # volatilitas, lompatan, Monte Carlo, bias
 src/evaluation.py           # walk-forward: coverage, pinball, Brier
+src/report.py               # laporan komputasi (angka + grafik)
 src/email_dispatcher.py     # email HTML + teks, Gmail SMTP
-tests/                      # 33 tes offline
+tests/                      # 36 tes offline
 tools/                      # backtest, compare_mt5, probe_twelvedata, probe_symbols
 .github/workflows/          # daily_xauusd.yml (jadwal) dan ci.yml (tes)
 ```

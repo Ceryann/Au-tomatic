@@ -8,6 +8,9 @@ Options:
     --sessions N   how many past sessions to evaluate (default 120)
     --yahoo        use Yahoo GC=F futures instead (no API key needed; levels are futures)
     --macro        also use DXY / US10Y features (needs Yahoo; slower)
+    --set K=V      override a config value, repeatable, e.g.
+                   --set model.drift.k_kalman=1 --set model.drift.cap_sigma_mult=10
+                   (full trend extrapolation: tests whether extrapolating the Kalman trend helps)
 
 Read the report like this:
   * "inside" should be near 70%. 60-80% is acceptable for ~120 sessions.
@@ -45,12 +48,24 @@ def main() -> int:
     ap.add_argument("--sessions", type=int, default=120)
     ap.add_argument("--yahoo", action="store_true")
     ap.add_argument("--macro", action="store_true")
+    ap.add_argument("--set", action="append", default=[], metavar="K=V", help="Override config, e.g. model.drift.k_kalman=1")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     ap.add_argument("--out", default=str(ROOT / "out"))
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    for item in args.set:
+        key, _, raw = item.partition("=")
+        node = cfg
+        parts = key.split(".")
+        for part in parts[:-1]:
+            node = node[part]
+        if parts[-1] not in node:
+            print(f"Unknown config key: {key}")
+            return 2
+        node[parts[-1]] = yaml.safe_load(raw)
+        print(f"override: {key} = {node[parts[-1]]}")
     now = pd.Timestamp.now(tz="UTC")
 
     try:
