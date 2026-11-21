@@ -1,7 +1,9 @@
-# Sprint 1 (data layer + email). Model libraries are added in Sprint 2.
+# Au-tomatic dependencies
 numpy>=1.26
 pandas>=2.1
+scipy>=1.11
 yfinance>=0.2.54
+requests>=2.31
 PyYAML>=6.0
 tzdata>=2024.1
 pytest>=8.0
