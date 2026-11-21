@@ -1,15 +1,21 @@
-# XAUUSD Quant Sentinel - configuration
+# Au-tomatic - configuration
 # Locked decision: D1 candle boundary = 17:00 America/New_York
 # (matches the MT5 broker D1 open of the project owner).
 
 market:
-  primary_symbol: "XAUUSD=X"     # Spot gold (Yahoo)
-  futures_symbol: "GC=F"         # Fallback only; basis differs from spot
+  twelvedata_symbol: "XAU/USD"   # TRUE spot gold (primary source)
+  yahoo_symbols: ["GC=F"]        # Futures fallback only (Yahoo spot XAUUSD=X no longer exists)
   candle_cutoff_tz: "America/New_York"
   candle_cutoff_hour: 17         # D1 candle opens/closes at 17:00 NY
 
+twelvedata:
+  api_key_env: "TWELVEDATA_API_KEY"   # read from environment / GitHub Secret
+  page_size: 5000                     # max bars per request on the free plan
+  max_pages: 4                        # 4 pages ~ 20,000 hourly bars (~2.8 years)
+  min_interval_seconds: 1             # pause between pages (limit: 8 requests/min)
+
 data:
-  history_days: 725              # Yahoo limits 1h data to ~730 days
+  history_days: 725              # stop paging once this much history is loaded
   min_sessions: 400              # minimum complete D1 candles required
   min_bars_per_session: 12       # hourly bars; gold normally has ~23
   max_stale_hours: 4             # newest hourly bar must be this fresh
@@ -17,6 +23,40 @@ data:
   max_missing_weekdays: 15       # holidays tolerated before warning
   retries: 4
   backoff_seconds: 5             # exponential: 5, 10, 20, ...
+
+model:
+  n_paths: 10000                 # Monte Carlo paths
+  quantiles: [0.15, 0.50, 0.85]  # reported interval = P15-P85 (70% prediction interval)
+  hmm:
+    n_inits: 6                   # random restarts; best log-likelihood wins
+    n_iter: 150
+    min_history: 250             # minimum daily observations to fit the HMM
+    seed: 7
+  vol:
+    ewma_lambda: 0.94            # RiskMetrics decay
+    w_regime: 0.5                # weight of HMM regime vol vs EWMA vol
+    floor_mult: 0.5              # sigma_D clipped to [floor, cap] x 60-day realised vol
+    cap_mult: 2.0
+  drift:
+    k_regime: 0.5                # shrinkage on HMM regime mean
+    k_kalman: 0.5                # shrinkage on Kalman velocity
+    cap_sigma_mult: 0.2          # |mu_D| <= 0.2 x sigma_D
+  jumps:
+    mad_threshold: 2.5           # jump day: |r - median| > 2.5 x robust sigma
+    lambda_min: 0.02
+    lambda_max: 0.15
+    lambda_cap: 0.50             # absolute ceiling after multipliers
+    event_mult: 1.75             # high-impact event day (hook for Sprint 4)
+    sunday_mult: 1.5             # weekend-gap risk on Sunday runs
+  bias:
+    bull_above: 0.56             # P(close > open) >= 56% -> Bullish
+    bear_below: 0.44             # <= 44% -> Bearish, otherwise Netral
+  macro:
+    enabled: true                # DXY / US10Y as extra HMM features (optional)
+    symbols:
+      dxy: "DX-Y.NYB"
+      tnx: "^TNX"
+    min_coverage: 0.95
 
 email:
   subject_prefix: "[XAUUSD D1]"
