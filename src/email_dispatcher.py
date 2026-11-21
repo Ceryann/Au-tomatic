@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .data_fetcher import DataBundle
+from .quant_engine import Forecast
 
 DISCLAIMER = "Estimasi statistik, bukan nasihat finansial."
 
@@ -35,7 +36,8 @@ def _wrap_html(title: str, body_rows: str, footer: str) -> str:
 <tr><td align="center" style="padding:16px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
  style="max-width:600px;background:#ffffff;border-radius:8px;font-family:Arial,Helvetica,sans-serif;color:#111827;">
-<tr><td style="padding:20px 20px 8px 20px;font-size:18px;font-weight:bold;">{html.escape(title)}</td></tr>
+<tr><td style="padding:16px 20px 0 20px;font-size:11px;letter-spacing:1px;color:#b45309;">AU-TOMATIC &middot; AURUM</td></tr>
+<tr><td style="padding:4px 20px 8px 20px;font-size:18px;font-weight:bold;">{html.escape(title)}</td></tr>
 {body_rows}
 <tr><td style="padding:12px 20px 20px 20px;font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;">{footer}</td></tr>
 </table>
@@ -106,6 +108,109 @@ def build_data_check_email(bundle: DataBundle, cfg: dict) -> tuple[str, str, str
         rows,
         f"Dibuat {_to_local(bundle.now_utc, tz)} WIB. {DISCLAIMER}",
     )
+    return subject, body, "\n".join(plain)
+
+
+def _usd(x: float, decimals: int = 0) -> str:
+    return f"${x:,.{decimals}f}"
+
+
+def _signed(x: float) -> str:
+    sign = "+" if x >= 0 else "\u2212"
+    return f"{sign}${abs(x):,.0f}"
+
+
+_BIAS_COLOR = {"Bullish": "#15803d", "Bearish": "#b91c1c", "Netral": "#4b5563"}
+
+
+def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[str, str, str]:
+    """Final forecast email: short, one column, readable on a phone screen."""
+    tz = cfg["email"]["display_tz"]
+    c15, c50, c85 = fc.close_q
+    h15, h50, h85 = fc.high_q
+    l15, l50, l85 = fc.low_q
+    o = fc.open_price
+    futures = bundle.is_futures
+    tag = " (Futures, basis != spot)" if futures else ""
+
+    # The bias word is only informative when it leaves the Netral zone, so it is omitted otherwise.
+    core = f"Close {_usd(c15)}\u2013{_usd(c85)} | H ~{_usd(h50)} | L ~{_usd(l50)}"
+    if fc.bias != "Netral":
+        core = f"{fc.bias} | {core}"
+    subject = f"{cfg['email']['subject_prefix']} {core}{tag}"
+
+    open_label = "Open candle" if fc.open_known else "Harga acuan (open belum ada)"
+    spot_label = "XAUUSD spot" if not futures else "Futures GC=F (bukan spot)"
+    color = _BIAS_COLOR.get(fc.bias, "#4b5563")
+
+    kal_txt = (
+        f"Momentum Kalman: {fc.kalman_label} "
+        f"({fc.kalman_velocity:+.1f} $/hari)".replace("-", "\u2212")
+    )
+    context = [
+        kal_txt,
+        f"Rezim pasar: {fc.regime}; kisaran hari ini {fc.vol_label} dibanding 30 hari terakhir.",
+    ]
+    context.append(
+        f"Range High\u2013Low rata-rata: {_usd(fc.avg_range_5)} (5 hari), {_usd(fc.avg_range_20)} (20 hari); "
+        f"perkiraan hari ini {_usd(fc.high_q[1] - fc.low_q[1])}."
+    )
+    if "dxy_ret" in fc.features_used or "tnx_chg" in fc.features_used:
+        context.append("Rezim juga memperhitungkan DXY dan US10Y.")
+
+    rows = [
+        (
+            '<tr><td style="padding:8px 20px 0 20px;font-size:13px;color:#6b7280;">'
+            f"Kisaran close D1 hari ini (70%)</td></tr>"
+            '<tr><td style="padding:0 20px;font-size:26px;font-weight:bold;">'
+            f"{_usd(c15, 2)} \u2013 {_usd(c85, 2)}</td></tr>"
+            '<tr><td style="padding:0 20px 8px 20px;font-size:14px;">'
+            f"{_signed(c15 - o)} s/d {_signed(c85 - o)} dari open ({_usd(o, 2)})</td></tr>"
+        ),
+        _row("Perkiraan High", f"{_usd(h50)} <span style='font-weight:normal;font-size:13px;'>"
+                               f"(kisaran {_usd(h15)} \u2013 {_usd(h85)}; {_signed(h50 - o)} dari open)</span>"),
+        _row("Perkiraan Low", f"{_usd(l50)} <span style='font-weight:normal;font-size:13px;'>"
+                              f"(kisaran {_usd(l15)} \u2013 {_usd(l85)}; {_signed(l50 - o)} dari open)</span>"),
+        _row("Median close / peluang candle naik",
+             f"{_usd(c50)} &middot; <span style='color:{color};'>{fc.p_up:.0%} ({html.escape(fc.bias)})</span>"),
+    ]
+    rows_html = "".join(rows)
+    rows_html += (
+        '<tr><td style="padding:6px 20px;font-size:13px;color:#374151;">'
+        "<ul style='margin:0 0 0 18px;padding:0;'>"
+        + "".join(f"<li>{html.escape(c)}</li>" for c in context)
+        + "</ul></td></tr>"
+    )
+
+    all_warnings = list(bundle.warnings) + list(fc.notes)
+    if all_warnings:
+        items = "".join(f"<li>{html.escape(w)}</li>" for w in all_warnings)
+        rows_html += (
+            '<tr><td style="padding:8px 20px;font-size:12px;color:#92400e;background:#fffbeb;">'
+            f"<b>Catatan</b><ul style='margin:4px 0 0 18px;padding:0;'>{items}</ul></td></tr>"
+        )
+
+    footer = (
+        f"{html.escape(spot_label)} &middot; sumber: {html.escape(bundle.source_label)} &middot; "
+        f"dibuat {_to_local(bundle.now_utc, tz)} WIB. "
+        "Radar berita/kalender belum aktif. Model belum divalidasi walk-forward. "
+        f"{DISCLAIMER}"
+    )
+    body = _wrap_html("Perkiraan candle D1 XAUUSD hari ini", rows_html, footer)
+
+    plain = [
+        f"AU-TOMATIC - perkiraan candle D1 XAUUSD ({bundle.target_session.date()})",
+        "",
+        f"Kisaran close (70%) : {_usd(c15, 2)} - {_usd(c85, 2)}",
+        f"  relatif open      : {_signed(c15 - o)} s/d {_signed(c85 - o)} (open {_usd(o, 2)})",
+        f"Perkiraan High      : {_usd(h50)} (kisaran {_usd(h15)} - {_usd(h85)})",
+        f"Perkiraan Low       : {_usd(l50)} (kisaran {_usd(l15)} - {_usd(l85)})",
+        f"Median close        : {_usd(c50)} | peluang candle naik {fc.p_up:.0%} ({fc.bias})",
+        "",
+    ] + [f"- {c}" for c in context]
+    if all_warnings:
+        plain += ["", "CATATAN:"] + [f"- {w}" for w in all_warnings]
+    plain += ["", f"Sumber: {bundle.source_label}", DISCLAIMER]
     return subject, body, "\n".join(plain)
 
 

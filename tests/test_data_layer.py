@@ -7,6 +7,7 @@ Run either way:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,6 +44,7 @@ def load_cfg() -> dict:
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
     cfg["data"]["retries"] = 1          # no sleeping in tests
     cfg["data"]["backoff_seconds"] = 0
+    cfg["twelvedata"]["min_interval_seconds"] = 0
     return cfg
 
 
@@ -76,19 +78,62 @@ def hourly_until(now: pd.Timestamp, seed: int = 1) -> pd.DataFrame:
     return h[h.index <= now]
 
 
+KEY_ENV = "TWELVEDATA_API_KEY"
+
+
 class FakeYahoo:
-    """Replace data_fetcher._download for the duration of a test."""
+    """Replace data_fetcher._download; also removes any real Twelve Data key from the env."""
 
     def __init__(self, handler):
         self.handler = handler
 
     def __enter__(self):
         self._orig = df_mod._download
+        self._key = os.environ.pop(KEY_ENV, None)
         df_mod._download = self.handler
         return self
 
     def __exit__(self, *exc):
         df_mod._download = self._orig
+        if self._key is not None:
+            os.environ[KEY_ENV] = self._key
+
+
+class FakeTD:
+    """Replace data_fetcher._td_request with a pager over `hourly` (newest bars first)."""
+
+    def __init__(self, hourly=None, error=None):
+        self.hourly, self.error, self.calls = hourly, error, []
+
+    def _handler(self, params):
+        self.calls.append(params.get("end_date"))
+        if self.error:
+            raise DataError(self.error)
+        end = pd.Timestamp(params["end_date"], tz="UTC")
+        sl = self.hourly[self.hourly.index <= end].tail(int(params["outputsize"]))
+        if sl.empty:
+            return {"code": 400, "message": "no data", "status": "error"}
+        vals = [
+            {"datetime": ts.strftime("%Y-%m-%d %H:%M:%S"), "open": repr(float(r.Open)),
+             "high": repr(float(r.High)), "low": repr(float(r.Low)), "close": repr(float(r.Close))}
+            for ts, r in sl.iloc[::-1].iterrows()
+        ]
+        return {"values": vals, "status": "ok"}
+
+    def __enter__(self):
+        self._orig_req, self._orig_dl = df_mod._td_request, df_mod._download
+        self._key = os.environ.get(KEY_ENV)
+        os.environ[KEY_ENV] = "TEST-KEY"
+        df_mod._td_request = self._handler
+        df_mod._download = lambda *a, **k: (_ for _ in ()).throw(DataError("yahoo disabled in this test"))
+        return self
+
+    def __exit__(self, *exc):
+        df_mod._td_request, df_mod._download = self._orig_req, self._orig_dl
+        if self._key is None:
+            os.environ.pop(KEY_ENV, None)
+        else:
+            os.environ[KEY_ENV] = self._key
 
 
 # ---------------------------------------------------------------- sessions
@@ -126,7 +171,7 @@ def test_candle_aggregation_is_consistent():
     hourly = make_hourly("2025-01-05", 4)
     candles = build_ny_close_candles(hourly, TZ, HOUR, utc("2025-02-10 12:00"))
     assert len(candles) == 20                       # 4 weeks x 5 sessions
-    assert (candles.index.weekday < 5).all()
+    assert (candles.index.dayofweek < 5).all()
     assert candles["bars"].between(23, 25).all()
     assert (candles["High"] >= candles["Low"]).all()
     # first candle's open == first hourly open; last close == last hourly close
@@ -180,42 +225,64 @@ def test_validation_rejects_broken_candles():
 
 
 # ------------------------------------------------------------- integration
-def test_bundle_from_hourly_spot():
+def test_bundle_from_twelvedata_spot_with_paging():
     cfg = load_cfg()
+    cfg["twelvedata"]["page_size"] = 3000        # force several pages
     hourly = hourly_until(NOW)
-
-    def handler(symbol, interval, days):
-        assert symbol == "XAUUSD=X" and interval == "1h"
-        return hourly
-
-    with FakeYahoo(handler):
+    td = FakeTD(hourly)
+    with td:
         b = get_gold_bundle(cfg, now_utc=NOW)
 
-    assert b.quality == "nyclose_1h" and not b.is_futures
+    assert b.symbol == "XAU/USD" and not b.is_futures and b.quality == "nyclose_1h"
+    assert len(td.calls) >= 2                                   # paged backwards
     assert b.candles.index[-1] == pd.Timestamp("2026-01-13")
     assert b.target_session == pd.Timestamp("2026-01-14")
-    assert b.reference_price == hourly["Close"].iloc[-1]
-    assert b.session_open == hourly["Open"].iloc[-1]       # only the 22:00 UTC bar exists
-    assert not any("failed" in w for w in b.warnings)
+    assert abs(b.reference_price - hourly["Close"].iloc[-1]) < 1e-6     # string parsing: ~1e-13 noise
+    assert abs(b.session_open - hourly["Open"].iloc[-1]) < 1e-6
+    assert b.hourly is not None and len(b.hourly) > 1000
+    assert "Spot" in b.source_label
+    assert not any("failed" in w or "not set" in w for w in b.warnings)
 
 
 def test_fallback_to_futures_is_labelled():
     cfg = load_cfg()
     hourly = hourly_until(NOW, seed=2)
-
-    def handler(symbol, interval, days):
-        if symbol == "XAUUSD=X":
-            raise DataError("429 Too Many Requests")
-        return hourly
-
-    with FakeYahoo(handler):
+    td = FakeTD(error="429 Too Many Requests")
+    with td:
+        df_mod._download = lambda symbol, interval, days: hourly      # Yahoo works
         b = get_gold_bundle(cfg, now_utc=NOW)
 
     assert b.is_futures and b.symbol == "GC=F"
-    assert any("XAUUSD=X 1h failed" in w for w in b.warnings)
+    assert any("XAU/USD 1h failed" in w for w in b.warnings)
     assert any("Futures" in w for w in b.warnings)
     subject, html_body, text = build_data_check_email(b, cfg)
     assert "Futures" in subject and "Futures" in html_body
+
+
+def test_missing_key_is_reported_not_fatal():
+    cfg = load_cfg()
+    hourly = hourly_until(NOW, seed=2)
+    with FakeYahoo(lambda s, i, d: hourly):                            # also clears the env key
+        b = get_gold_bundle(cfg, now_utc=NOW)
+    assert b.is_futures
+    assert any("TWELVEDATA_API_KEY not set" in w for w in b.warnings)
+
+
+def test_twelvedata_key_never_leaks_in_errors():
+    import requests
+    orig = requests.get
+
+    def boom(*a, **k):
+        raise RuntimeError("HTTPError for url: https://api.twelvedata.com/x?apikey=SECRET123")
+
+    requests.get = boom
+    try:
+        df_mod._td_request({"apikey": "SECRET123"})
+        raise AssertionError("expected DataError")
+    except DataError as exc:
+        assert "SECRET123" not in str(exc) and "***" in str(exc)
+    finally:
+        requests.get = orig
 
 
 def test_daily_fallback_uses_exchange_calendar_date():
