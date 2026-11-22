@@ -123,10 +123,8 @@ def intraday_profile(hourly: Optional[pd.DataFrame], tz: str) -> np.ndarray:
     return prof / prof.sum()
 
 
-def segment_weights(
-    now_utc: pd.Timestamp, end_utc: pd.Timestamp, profile: np.ndarray, tz: str
-) -> np.ndarray:
-    """Variance weight of each remaining segment between `now` and the session end."""
+def segment_cuts(now_utc: pd.Timestamp, end_utc: pd.Timestamp) -> list[pd.Timestamp]:
+    """Boundaries of the hourly segments between `now` and the session end."""
     if end_utc <= now_utc:
         raise DataError("Session already closed; nothing left to forecast.")
     cuts = [now_utc]
@@ -135,11 +133,35 @@ def segment_weights(
         cuts.append(t)
         t += pd.Timedelta(hours=1)
     cuts.append(end_utc)
+    return cuts
+
+
+def segment_weights(
+    now_utc: pd.Timestamp, end_utc: pd.Timestamp, profile: np.ndarray, tz: str
+) -> np.ndarray:
+    """Variance weight of each remaining segment between `now` and the session end."""
+    cuts = segment_cuts(now_utc, end_utc)
     w = []
     for a, b in zip(cuts[:-1], cuts[1:]):
         hour = a.tz_convert(tz).hour
         w.append(profile[hour] * (b - a).total_seconds() / 3600.0)
     return np.array(w)
+
+
+def event_segments(
+    cuts: list[pd.Timestamp], weights: np.ndarray, event_times: Optional[list[pd.Timestamp]], max_events: int
+) -> list[int]:
+    """Segment index (0-based) in which each scheduled event lands.
+
+    With known times: the segment containing each event (earliest `max_events` kept).
+    Without times (e.g. the --event flag): one event at the variance midpoint of the session.
+    """
+    n = len(weights)
+    if event_times:
+        inside = sorted(t for t in event_times if cuts[0] <= t <= cuts[-1])[:max_events]
+        return [min(max(int(np.searchsorted(cuts, t, side="right")) - 1, 0), n - 1) for t in inside]
+    mid = float(np.searchsorted(np.cumsum(weights), weights.sum() / 2.0))
+    return [int(min(mid, n - 1))]
 
 
 def session_so_far(hourly: Optional[pd.DataFrame], start_utc: pd.Timestamp) -> Optional[dict]:
@@ -170,6 +192,7 @@ def simulate_day(
     n_paths: int,
     rng: np.random.Generator,
     return_paths: bool = False,
+    scheduled: Optional[dict[int, float]] = None,
 ) -> dict[str, np.ndarray]:
     """Simulate the remaining session. Returns arrays (price units) of close/high/low
     measured over the simulated part only (realised high/low are merged by the caller).
@@ -181,7 +204,8 @@ def simulate_day(
     run_max = np.zeros(n_paths)
     run_min = np.zeros(n_paths)
     path_log = [x.copy()] if return_paths else None
-    for wj in weights:
+    scheduled = scheduled or {}
+    for j, wj in enumerate(weights):
         z = rng.standard_normal(n_paths)
         a = x
         b = a + mu_d * wj + sigma_diff * np.sqrt(wj) * z
@@ -193,6 +217,8 @@ def simulate_day(
         seg_min = 0.5 * (a + b - np.sqrt(d * d - 2.0 * s2 * np.log(u2)))
         n_j = rng.poisson(lam * wj, n_paths)
         jump = mu_j * n_j + sig_j * np.sqrt(n_j) * rng.standard_normal(n_paths)
+        if j in scheduled:                                   # scheduled release: extra Gaussian jump
+            jump = jump + scheduled[j] * rng.standard_normal(n_paths)
         x = b + jump
         run_max = np.maximum(run_max, np.maximum(seg_max, x))
         run_min = np.minimum(run_min, np.minimum(seg_min, x))
@@ -217,6 +243,7 @@ def forecast_day(
     cfg: dict,
     event_today: bool = False,
     explain: bool = False,
+    event_times: Optional[list[pd.Timestamp]] = None,
 ) -> Forecast:
     m = cfg["model"]
     tz = cfg["market"]["candle_cutoff_tz"]
@@ -261,8 +288,6 @@ def forecast_day(
     jcfg = m["jumps"]
     lam0, mu_j, sig_j, _ = calibrate_jumps(r.values, jcfg)
     mult = 1.0
-    if event_today:
-        mult *= jcfg["event_mult"]
     if bundle.session_open is None:
         mult *= jcfg["sunday_mult"]
         notes.append("Weekend-gap session: jump risk raised.")
@@ -284,11 +309,20 @@ def forecast_day(
     realized_high = so_far["high"] if so_far else None
     realized_low = so_far["low"] if so_far else None
 
+    # ---- scheduled high-impact events: extra variance at the release hour
+    scheduled: dict[int, float] = {}
+    sigma_event = float(np.sqrt(jcfg["event_extra_var"]) * sigma_d)
+    if event_today:
+        cuts = segment_cuts(now_eff, end_utc)
+        for j in event_segments(cuts, weights, event_times, int(jcfg["max_scheduled_events"])):
+            scheduled[j] = float(np.sqrt(scheduled.get(j, 0.0) ** 2 + sigma_event ** 2))
+        notes.append("High-impact USD event today: extra variance added at the release, so the band is wider.")
+
     # ---- Monte Carlo
     seed = int(bundle.target_session.strftime("%Y%m%d"))
     rng = np.random.default_rng(seed)
     sim = simulate_day(p0, weights, sigma_diff, mu_d, lam, mu_j, sig_j, int(m["n_paths"]), rng,
-                       return_paths=explain)
+                       return_paths=explain, scheduled=scheduled)
     close_s = sim["close"]
     high_s = sim["high"] if realized_high is None else np.maximum(sim["high"], realized_high)
     low_s = sim["low"] if realized_low is None else np.minimum(sim["low"], realized_low)
@@ -340,6 +374,8 @@ def forecast_day(
             "profile": [float(x) for x in profile], "now_eff": str(now_eff), "end": str(end_utc),
             "n_segments": int(len(weights)), "remaining": float(weights.sum()),
         },
+        "event": {"n": len(scheduled), "sigma_event": sigma_event if scheduled else 0.0,
+                  "extra_var": float(jcfg["event_extra_var"]) if scheduled else 0.0},
         "p0": p0,
     }
     if explain:

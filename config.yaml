@@ -46,7 +46,9 @@ model:
     lambda_min: 0.02
     lambda_max: 0.15
     lambda_cap: 0.50             # absolute ceiling after multipliers
-    event_mult: 1.75             # high-impact event day (hook for Sprint 4)
+    event_extra_var: 0.5         # extra variance on a high-impact event day, as a share of daily variance
+                                 # (0.5 = the day is ~1.5x as variable). Calibrate: python tools/event_study.py
+    max_scheduled_events: 2      # at most this many events add variance on one day
     sunday_mult: 1.5             # weekend-gap risk on Sunday runs
   bias:
     bull_above: 0.56             # P(close > open) >= 56% -> Bullish
@@ -58,8 +60,45 @@ model:
       tnx: "^TNX"
     min_coverage: 0.95
 
+news:
+  enabled: true
+  timeout_seconds: 10
+  event_currency: "USD"
+  lambda_impacts: ["High"]            # these raise the jump intensity
+  display_impacts: ["High", "Medium"] # these are listed in the email
+  calendar_urls:
+    - "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    - "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+  # Fallback when the calendar feed is down: FOMC decision days (Federal Reserve calendar).
+  # 2027 dates are tentative until confirmed by the Fed.
+  static_events:
+    - {date: "2026-12-09", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-01-27", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-03-17", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-04-28", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-06-09", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-07-28", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-09-15", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-10-27", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+    - {date: "2027-12-08", time_ny: "14:00", title: "FOMC rate decision", impact: "High"}
+  # Check these with: python tools/probe_news.py  (feeds change; any failing feed is skipped).
+  # FXStreet's RSS refused connections from the owner's network, so Google News queries are used instead.
+  rss_urls:
+    - "https://news.google.com/rss/search?q=gold+price+OR+XAUUSD+OR+%22spot+gold%22+when:1d&hl=en-US&gl=US&ceid=US:en"
+    - "https://news.google.com/rss/search?q=gold+%28Fed+OR+dollar+OR+yields+OR+inflation+OR+payrolls%29+when:1d&hl=en-US&gl=US&ceid=US:en"
+    - "https://news.google.com/rss/search?q=gold+%28%22safe+haven%22+OR+geopolitical+OR+%22central+bank%22+OR+tensions%29+when:1d&hl=en-US&gl=US&ceid=US:en"
+  max_age_hours: 36
+  extreme_score: 0.45                 # |aggregate score| at or above this shows headlines
+  max_headlines: 3
+
+ledger:
+  path: "data/predictions_log.csv"   # relative forecasts + hit flags only (no prices)
+  window: 30                         # sessions used for the live accuracy line
+  min_n: 10                          # show the percentage only after this many settled sessions
+
 email:
   subject_prefix: "[XAUUSD D1]"
   smtp_host: "smtp.gmail.com"
   smtp_port: 465
   display_tz: "Asia/Jakarta"     # WIB, for times shown in the email
+  hide_recipients: true          # recipients cannot see each other (Bcc-style)

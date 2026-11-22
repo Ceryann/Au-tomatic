@@ -31,7 +31,7 @@ from .data_fetcher import (
     build_ny_close_candles,
     session_end_utc,
 )
-from .quant_engine import ewma_vol_series, forecast_day
+from .quant_engine import calibrate_jumps, ewma_vol_series, forecast_day
 
 log = logging.getLogger(__name__)
 
@@ -154,3 +154,47 @@ def run_backtest(
         pinball_model=float(df["pin_model"].mean()), pinball_baseline=float(df["pin_base"].mean()),
         brier=brier, brier_baseline=0.25, call_hit_rate=hit, n_calls=len(calls), table=df,
     )
+
+
+# --------------------------------------------------------------------------
+# Event study: do high-impact event days really have more variance?
+# --------------------------------------------------------------------------
+# FOMC decision days (second day of each meeting, 14:00 New York), from the Federal Reserve calendar.
+FOMC_DECISION_DAYS = [
+    "2024-01-31", "2024-03-20", "2024-05-01", "2024-06-12", "2024-07-31", "2024-09-18", "2024-11-07", "2024-12-18",
+    "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
+    "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17", "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+]
+
+
+def event_study(candles: pd.DataFrame, event_dates: list[str], cfg: dict,
+                n_boot: int = 5000, seed: int = 0) -> dict:
+    """Compare close-to-close variance on event days with normal days.
+
+    The model adds extra variance `event_extra_var x sigma_D^2` at the release hour, so the day's
+    variance becomes (1 + event_extra_var) x normal. The observed variance ratio therefore maps
+    directly to the recommended `model.jumps.event_extra_var = ratio - 1` (never below 0), with a
+    bootstrap 95% interval.
+    """
+    r = np.log(candles["Close"].astype(float)).diff().dropna()
+    is_event = r.index.isin(pd.DatetimeIndex(event_dates))
+    r_ev, r_nm = r[is_event].values, r[~is_event].values
+    if len(r_ev) < 5:
+        raise DataError(f"Only {len(r_ev)} event days inside the history; need at least 5.")
+
+    nm_var = float(np.mean(r_nm ** 2))
+    ratio = float(np.mean(r_ev ** 2) / nm_var)
+    rng = np.random.default_rng(seed)
+    boots = np.array([np.mean(rng.choice(r_ev ** 2, size=len(r_ev), replace=True)) / nm_var for _ in range(n_boot)])
+    lo, hi = (float(x) for x in np.quantile(boots, [0.025, 0.975]))
+
+    rg = ((candles["High"] - candles["Low"]) / candles["Close"]).reindex(r.index)
+    range_ratio = float(rg[is_event].mean() / rg[~is_event].mean())
+    configured = float(cfg["model"]["jumps"]["event_extra_var"])
+    return {
+        "n_event": int(len(r_ev)), "n_normal": int(len(r_nm)),
+        "var_ratio": ratio, "ci": (lo, hi), "range_ratio": range_ratio,
+        "recommended_extra_var": max(ratio - 1.0, 0.0),
+        "extra_var_ci": (max(lo - 1.0, 0.0), max(hi - 1.0, 0.0)),
+        "configured_extra_var": configured, "configured_ratio": 1.0 + configured,
+    }

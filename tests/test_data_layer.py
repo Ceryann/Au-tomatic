@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 
 from src import data_fetcher as df_mod  # noqa: E402
+from src import news_sentinel as ns_mod  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     DataError,
     build_ny_close_candles,
@@ -81,6 +82,10 @@ def hourly_until(now: pd.Timestamp, seed: int = 1) -> pd.DataFrame:
 KEY_ENV = "TWELVEDATA_API_KEY"
 
 
+def _offline_http(url, timeout=0):
+    raise OSError("network disabled in tests")
+
+
 class FakeYahoo:
     """Replace data_fetcher._download; also removes any real Twelve Data key from the env."""
 
@@ -89,12 +94,15 @@ class FakeYahoo:
 
     def __enter__(self):
         self._orig = df_mod._download
+        self._orig_http = ns_mod._http_get
         self._key = os.environ.pop(KEY_ENV, None)
         df_mod._download = self.handler
+        ns_mod._http_get = _offline_http                       # tests must never touch the network
         return self
 
     def __exit__(self, *exc):
         df_mod._download = self._orig
+        ns_mod._http_get = self._orig_http
         if self._key is not None:
             os.environ[KEY_ENV] = self._key
 
@@ -126,9 +134,12 @@ class FakeTD:
         os.environ[KEY_ENV] = "TEST-KEY"
         df_mod._td_request = self._handler
         df_mod._download = lambda *a, **k: (_ for _ in ()).throw(DataError("yahoo disabled in this test"))
+        self._orig_http = ns_mod._http_get
+        ns_mod._http_get = _offline_http
         return self
 
     def __exit__(self, *exc):
+        ns_mod._http_get = self._orig_http
         df_mod._td_request, df_mod._download = self._orig_req, self._orig_dl
         if self._key is None:
             os.environ.pop(KEY_ENV, None)
@@ -374,6 +385,82 @@ def test_emails_render_without_nan():
         assert "nan" not in blob.lower().replace("finansial", "")
     e_subject, e_html, e_text = build_error_email("boom <b>", cfg)
     assert "TIDAK TERSEDIA" in e_subject and "&lt;b&gt;" in e_html
+
+
+# --------------------------------------------------------------- recipients
+def test_parse_recipients_handles_real_world_input():
+    from src.email_dispatcher import parse_recipients
+
+    assert parse_recipients("a@gmail.com, b@gmail.com") == ["a@gmail.com", "b@gmail.com"]
+    assert parse_recipients("a@gmail.com;b@gmail.com,") == ["a@gmail.com", "b@gmail.com"]
+    assert parse_recipients(" A@Gmail.com a@gmail.com\n<c@x.org> ") == ["A@Gmail.com", "c@x.org"]
+    assert parse_recipients("not-an-email, , @, x@y") == []
+    assert parse_recipients("") == [] and parse_recipients(None) == []
+
+
+class _FakeSMTP:
+    refuse: dict = {}
+    last: dict = {}
+
+    def __init__(self, host, port, context=None, timeout=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        _FakeSMTP.last["login"] = (user, password)
+
+    def sendmail(self, sender, recipients, message):
+        _FakeSMTP.last.update(sender=sender, recipients=list(recipients), message=message)
+        return dict(_FakeSMTP.refuse)
+
+
+def _send_with_fake(to, **kw):
+    import smtplib
+    from src.email_dispatcher import send_email
+
+    orig = smtplib.SMTP_SSL
+    smtplib.SMTP_SSL = _FakeSMTP
+    try:
+        return send_email("Subj", "<b>x</b>", "x", user="bot@gmail.com", password="pw", to=to, **kw)
+    finally:
+        smtplib.SMTP_SSL = orig
+
+
+def test_send_email_reaches_every_recipient_and_hides_addresses():
+    _FakeSMTP.refuse, _FakeSMTP.last = {}, {}
+    ok, bad = _send_with_fake("one@gmail.com, two@gmail.com")
+    assert (ok, bad) == (2, 0)
+    assert _FakeSMTP.last["recipients"] == ["one@gmail.com", "two@gmail.com"]
+    header_block = _FakeSMTP.last["message"].split("\n\n", 1)[0]
+    assert "one@gmail.com" not in header_block and "two@gmail.com" not in header_block   # hidden
+    assert "To: bot@gmail.com" in header_block
+
+
+def test_send_email_can_show_recipients_when_configured():
+    _FakeSMTP.refuse, _FakeSMTP.last = {}, {}
+    _send_with_fake("one@gmail.com, two@gmail.com", hide_recipients=False)
+    header_block = _FakeSMTP.last["message"].split("\n\n", 1)[0]
+    assert "one@gmail.com" in header_block and "two@gmail.com" in header_block
+
+
+def test_partial_refusal_is_reported_not_swallowed():
+    _FakeSMTP.refuse, _FakeSMTP.last = {"two@gmail.com": (550, b"no such user")}, {}
+    ok, bad = _send_with_fake("one@gmail.com, two@gmail.com")
+    assert (ok, bad) == (1, 1)
+    _FakeSMTP.refuse = {}
+
+
+def test_no_valid_recipient_raises_clear_error():
+    try:
+        _send_with_fake(" , ; ")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "no valid email" in str(exc)
 
 
 if __name__ == "__main__":

@@ -281,6 +281,8 @@ def build_report(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[str, str]
              ["Ukuran lompatan (std)", _pct(jp["sig_j"], 3)],
              ["Pengali (akhir pekan/event)", f"x{jp['mult']:.2f}"],
              ["Frekuensi dipakai", f"{jp['lam']:.3f}"],
+             ["Lompatan terjadwal (event)", (f"{d['event']['n']} event, masing-masing std {_pct(d['event']['sigma_event'], 3)}"
+                                              if d["event"]["n"] else "tidak ada")],
              ["Volatilitas difusi (di luar lompatan)", _pct(jp["sigma_diff"], 3)],
              ["Porsi varians hari yang tersisa", f"{it['remaining']:.1%}"],
              ["Jumlah segmen jam yang disimulasikan", str(it["n_segments"])]],

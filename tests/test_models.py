@@ -186,8 +186,8 @@ def test_event_day_widens_the_range():
     b = bundle_at(T.NOW, T.hourly_until(T.NOW, seed=11), cfg)
     base = forecast_day(b, None, cfg)
     event = forecast_day(b, None, cfg, event_today=True)
-    assert (event.close_q[2] - event.close_q[0]) >= (base.close_q[2] - base.close_q[0])
-    assert event.lam > base.lam
+    assert (event.close_q[2] - event.close_q[0]) > (base.close_q[2] - base.close_q[0])
+    assert event.diag["event"]["n"] == 1 and base.diag["event"]["n"] == 0
 
 
 def test_sunday_gap_run_is_flagged_and_forecasts_monday():
@@ -321,6 +321,43 @@ def test_report_failure_never_replaces_the_forecast_email():
             sys.modules["src.report"] = saved
     assert rc == 0
     assert "TIDAK TERSEDIA" not in preview and "Kisaran close" in preview
+
+
+def test_ci_logs_contain_no_price_levels():
+    """Actions logs of a public repo are public: they must not print price levels."""
+    import logging
+    import re
+    import tempfile
+
+    import main as main_mod
+
+    messages: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    handler, root = Capture(), logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    prev = os.environ.get("GITHUB_ACTIONS")
+    os.environ["GITHUB_ACTIONS"] = "true"
+    hourly = T.hourly_until(T.NOW, seed=11)
+    try:
+        with tempfile.TemporaryDirectory() as tmp, T.FakeYahoo(lambda s, i, d: hourly):
+            rc = main_mod.main(["--dry-run", "--no-macro", "--out", tmp, "--now", "2026-01-13T22:30:00Z"])
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+        if prev is None:
+            os.environ.pop("GITHUB_ACTIONS", None)
+        else:
+            os.environ["GITHUB_ACTIONS"] = prev
+    joined = "\n".join(messages)
+    assert rc == 0 and "Forecast:" in joined
+    assert "Subject" not in joined
+    assert not re.search(r"\b\d{4}\.\d{1,2}\b", joined), joined      # nothing like 3458.16
 
 
 # -------------------------------------------------------------------- email

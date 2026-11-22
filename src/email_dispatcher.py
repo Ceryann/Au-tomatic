@@ -7,6 +7,7 @@ final single-column, 600px, inline-CSS design so Sprint 2 only swaps the content
 from __future__ import annotations
 
 import html
+import re
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .data_fetcher import DataBundle
+from .news_sentinel import NewsReport
 from .quant_engine import Forecast
 
 DISCLAIMER = "Estimasi statistik, bukan nasihat finansial."
@@ -111,6 +113,10 @@ def build_data_check_email(bundle: DataBundle, cfg: dict) -> tuple[str, str, str
     return subject, body, "\n".join(plain)
 
 
+def news_time(ts: pd.Timestamp, tz: str) -> str:
+    return ts.tz_convert(ZoneInfo(tz)).strftime("%H:%M")
+
+
 def _usd(x: float, decimals: int = 0) -> str:
     return f"${x:,.{decimals}f}"
 
@@ -123,7 +129,10 @@ def _signed(x: float) -> str:
 _BIAS_COLOR = {"Bullish": "#15803d", "Bearish": "#b91c1c", "Netral": "#4b5563"}
 
 
-def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[str, str, str]:
+def build_forecast_email(
+    bundle: DataBundle, fc: Forecast, cfg: dict, accuracy: dict | None = None,
+    news: NewsReport | None = None,
+) -> tuple[str, str, str]:
     """Final forecast email: short, one column, readable on a phone screen."""
     tz = cfg["email"]["display_tz"]
     c15, c50, c85 = fc.close_q
@@ -155,6 +164,16 @@ def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[s
         f"Range High\u2013Low rata-rata: {_usd(fc.avg_range_5)} (5 hari), {_usd(fc.avg_range_20)} (20 hari); "
         f"perkiraan hari ini {_usd(fc.high_q[1] - fc.low_q[1])}."
     )
+    if accuracy is not None:
+        if accuracy.get("ready"):
+            context.append(
+                f"Akurasi live {accuracy['n']} hari terakhir: close {accuracy['close']:.0%}, "
+                f"high {accuracy['high']:.0%}, low {accuracy['low']:.0%} berada di dalam kisaran (target 70%)."
+            )
+        else:
+            context.append(
+                f"Akurasi live: mengumpulkan data ({accuracy.get('n', 0)}/{accuracy.get('min_n', 10)} hari)."
+            )
     if "dxy_ret" in fc.features_used or "tnx_chg" in fc.features_used:
         context.append("Rezim juga memperhitungkan DXY dan US10Y.")
 
@@ -182,7 +201,48 @@ def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[s
         + "</ul></td></tr>"
     )
 
+    # ---- calendar events and news (only when the radar ran)
+    news_plain: list[str] = []
+    if news is not None:
+        if news.events:
+            items = "".join(
+                f"<li>{news_time(e_.time_utc, tz)} WIB: {html.escape(e_.title)} ({html.escape(e_.impact)})</li>"
+                for e_ in news.events
+            )
+            widened = (" Kisaran dilebarkan karena risiko lompatan." if news.event_today else "")
+            rows_html += (
+                '<tr><td style="padding:6px 20px;font-size:13px;color:#374151;">'
+                f"<b>Event USD hari ini</b><ul style='margin:2px 0 0 18px;padding:0;'>{items}</ul>"
+                f"<span style='font-size:12px;color:#6b7280;'>{widened.strip()}</span></td></tr>"
+            )
+            news_plain += ["EVENT USD HARI INI:"] + [
+                f"- {news_time(e_.time_utc, tz)} WIB: {e_.title} ({e_.impact})" for e_ in news.events
+            ] + ([widened.strip()] if widened else [])
+        if not news.news_ok:
+            body_news, plain_news = "Radar berita tidak tersedia hari ini.", ["Radar berita tidak tersedia hari ini."]
+        elif news.show_news and news.headlines:
+            li = "".join(
+                f"<li>[{'Bullish' if h.score > 0 else 'Bearish'} Emas] "
+                + (f"<a href='{html.escape(h.link, quote=True)}'>{html.escape(h.title)}</a>" if h.link else html.escape(h.title))
+                + f" ({html.escape(h.source)})</li>" for h in news.headlines
+            )
+            body_news = f"<ul style='margin:2px 0 0 18px;padding:0;'>{li}</ul>"
+            plain_news = ["BERITA PENGGERAK:"] + [
+                f"- [{'Bullish' if h.score > 0 else 'Bearish'} Emas] {h.title} ({h.source})" for h in news.headlines
+            ]
+        else:
+            body_news = ("Tidak ada katalis berita signifikan; pergerakan didominasi dinamika "
+                         "volatilitas dan momentum kuantitatif.")
+            plain_news = [body_news]
+        rows_html += (
+            '<tr><td style="padding:6px 20px;font-size:13px;color:#374151;">'
+            f"<b>Berita</b><br>{body_news}</td></tr>"
+        )
+        news_plain += plain_news
+
     all_warnings = list(bundle.warnings) + list(fc.notes)
+    if news is not None:
+        all_warnings += [n_ for n_ in news.notes if "radar berita" not in n_]
     if all_warnings:
         items = "".join(f"<li>{html.escape(w)}</li>" for w in all_warnings)
         rows_html += (
@@ -190,11 +250,13 @@ def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[s
             f"<b>Catatan</b><ul style='margin:4px 0 0 18px;padding:0;'>{items}</ul></td></tr>"
         )
 
+    news_note = (
+        "Berita hanya ditampilkan dan tidak mengubah angka; event berisiko tinggi melebarkan kisaran. "
+        if news is not None else ""
+    )
     footer = (
         f"{html.escape(spot_label)} &middot; sumber: {html.escape(bundle.source_label)} &middot; "
-        f"dibuat {_to_local(bundle.now_utc, tz)} WIB. "
-        "Radar berita/kalender belum aktif. Model belum divalidasi walk-forward. "
-        f"{DISCLAIMER}"
+        f"dibuat {_to_local(bundle.now_utc, tz)} WIB. {news_note}{DISCLAIMER}"
     )
     body = _wrap_html("Perkiraan candle D1 XAUUSD hari ini", rows_html, footer)
 
@@ -208,6 +270,8 @@ def build_forecast_email(bundle: DataBundle, fc: Forecast, cfg: dict) -> tuple[s
         f"Median close        : {_usd(c50)} | peluang candle naik {fc.p_up:.0%} ({fc.bias})",
         "",
     ] + [f"- {c}" for c in context]
+    if news_plain:
+        plain += [""] + news_plain
     if all_warnings:
         plain += ["", "CATATAN:"] + [f"- {w}" for w in all_warnings]
     plain += ["", f"Sumber: {bundle.source_label}", DISCLAIMER]
@@ -232,6 +296,18 @@ def build_error_email(error_message: str, cfg: dict) -> tuple[str, str, str]:
     return subject, body, plain
 
 
+def parse_recipients(raw: str) -> list[str]:
+    """Split EMAIL_TO on commas, semicolons or whitespace; drop blanks, junk and duplicates."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in re.split(r"[,;\s]+", (raw or "").strip()):
+        addr = part.strip().strip("<>")
+        if addr and "@" in addr and "." in addr.split("@")[-1] and addr.lower() not in seen:
+            seen.add(addr.lower())
+            out.append(addr)
+    return out
+
+
 def send_email(
     subject: str,
     html_body: str,
@@ -242,16 +318,26 @@ def send_email(
     to: str,
     host: str = "smtp.gmail.com",
     port: int = 465,
-) -> None:
-    """Send a multipart/alternative message over SMTP-SSL. Never logs addresses."""
+    hide_recipients: bool = True,
+) -> tuple[int, int]:
+    """Send a multipart/alternative message over SMTP-SSL. Never logs addresses.
+
+    Returns (accepted, refused) recipient counts. With `hide_recipients` the recipients
+    are only in the SMTP envelope (like Bcc), so they cannot see each other's addresses.
+    """
+    recipients = parse_recipients(to)
+    if not recipients:
+        raise ValueError("EMAIL_TO contains no valid email address.")
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = user
-    msg["To"] = to
+    msg["To"] = user if hide_recipients else ", ".join(recipients)
     msg.attach(MIMEText(text_body, "plain", "utf-8"))   # fallback first
     msg.attach(MIMEText(html_body, "html", "utf-8"))    # preferred part last
 
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as server:
         server.login(user, password)
-        server.sendmail(user, [a.strip() for a in to.split(",")], msg.as_string())
+        refused = server.sendmail(user, recipients, msg.as_string()) or {}
+    return len(recipients) - len(refused), len(refused)

@@ -1,140 +1,159 @@
 # Au-tomatic
 
-*Au = Aurum (emas). Notifikasi otomatis kisaran candle D1 XAUUSD.*
+[![CI](https://github.com/USERNAME/au-tomatic/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/au-tomatic/actions/workflows/ci.yml)
 
-Bot yang mengirim **satu email pagi (WIB)** berisi perkiraan kisaran **Close, High, dan Low** candle D1 XAUUSD hari ini.
-Batas candle D1 = **17:00 New York** (sama dengan open candle D1 di MT5). Semua kisaran adalah **interval prediksi 70% (P15 sampai P85)**.
+*Au = Aurum (emas). Notifikasi pagi kisaran candle D1 XAUUSD.*
 
-> Estimasi statistik, bukan nasihat finansial. Bukan sinyal entry/SL/TP.
+**English abstract.** Au-tomatic is a daily Python bot that emails a probabilistic forecast of today's XAUUSD D1 candle (Close, High, Low as 70% prediction intervals). It builds 17:00-New-York candles from hourly spot data, estimates a trend with a Kalman filter and market regimes with a Hidden Markov Model, and simulates 10,000 intraday Merton jump-diffusion paths with release-hour jumps on high-impact USD event days. It is evaluated by walk-forward backtests and a live public ledger. It makes **no claim of directional skill**: the backtest shows gold's daily direction is not predictable from the trend, and the project reports that negative result openly.
 
-**Status: Sprint 2 dari 5.** Data spot + model + email prakiraan sudah ada. Radar berita/kalender (Sprint 4) belum aktif.
+> Estimasi statistik, bukan nasihat finansial. Bukan sinyal entry, SL, atau TP.
+
+## Apa yang dihasilkan
+
+Satu email pagi (Senin sampai Jumat, 05:30 WIB) berisi:
+
+- **Kisaran Close, High, dan Low** candle D1 hari ini (interval prediksi 70%, P15 sampai P85), absolut dan relatif terhadap open.
+- Peluang candle naik, rezim pasar, dan momentum tren.
+- **Event USD hari ini** (CPI, NFP, FOMC, dan lainnya) dan berita penggerak emas, hanya jika relevan.
+- **Akurasi live** 30 hari terakhir dari ledger yang dicatat otomatis.
+
+Batas candle D1 = **17:00 New York**, sama dengan open candle D1 di MT5.
 
 ## Cara kerja
 
-1. **Data:** harga spot XAU/USD per jam dari Twelve Data (± 2 tahun). Cadangan: futures `GC=F` dari Yahoo (levelnya bukan spot, dan email melabelinya).
-2. **Candle D1** dibentuk dengan batas 17:00 New York, candle yang belum selesai dibuang, lalu data divalidasi.
-3. **Kalman Filter** (local linear trend) mengestimasi kecepatan tren dalam $/hari.
-4. **HMM 3 rezim** (Konsolidasi, Trending, Shock) dari return harian, volatilitas 10 hari, dan opsional DXY serta US10Y. Rezim diberi nama berdasarkan peringkat volatilitasnya, jadi "Trending" berarti "aktif/volatilitas menengah".
-5. **Monte Carlo Merton jump-diffusion** (10.000 jalur, per jam) dari harga terbaru sampai penutupan sesi, dengan profil volatilitas intraday dan High/Low yang sudah terjadi dihitung. Hasilnya kisaran Close, High, Low, dan peluang candle naik.
-6. **Email** menampilkan kisaran absolut dan **relatif terhadap open**, supaya bisa dipakai langsung di atas harga open MT5 Anda.
+```mermaid
+flowchart LR
+  A[Twelve Data XAU/USD 1 jam] --> B[Candle D1 17:00 NY + validasi]
+  B --> C[Kalman: tren]
+  B --> D[HMM: 3 rezim]
+  C --> F[Drift]
+  D --> G[Volatilitas]
+  H[Kalender dan berita] --> I[Lompatan event terjadwal]
+  F --> J[Monte Carlo Merton, 10.000 jalur per jam]
+  G --> J
+  I --> J
+  J --> K[Close, High, Low: P15 sampai P85]
+  K --> L[Email]
+  K --> M[Ledger akurasi]
+```
 
-Yang model **tidak** lakukan: menebak arah dengan akurat. Untuk emas harian, peluang naik wajar berada di 45 sampai 58%. Label **Netral** muncul jika peluang di antara 44% dan 56%.
+1. **Data:** spot XAU/USD per jam dari Twelve Data (± 2,8 tahun). Cadangan: futures `GC=F` dari Yahoo, dengan label jelas. Data divalidasi (tanggal candle terakhir, OHLC, kesegaran feed). Jika gagal, yang dikirim adalah email "prediksi tidak tersedia", tidak pernah angka basi.
+2. **Kalman Filter** (local linear trend, hanya estimasi *filtered*): kecepatan tren dalam $/hari.
+3. **HMM 3 rezim** (ditulis sendiri dengan numpy, EM berskala): dinamai dari peringkat volatilitas (Konsolidasi, Trending, Shock). Simulasi menunjukkan peringkat volatilitas jauh lebih stabil daripada peringkat rata-rata return.
+4. **Monte Carlo Merton jump-diffusion** per jam sampai penutupan candle, dengan profil volatilitas intraday, koreksi Brownian bridge untuk High/Low, dan High/Low yang sudah terjadi.
+5. **Event terjadwal:** hari event USD berdampak tinggi menambah varians pada jam rilis, dikalibrasi dengan event study FOMC.
+6. **Berita:** kamus heuristik khusus emas (bukan VADER, karena "perang" itu negatif bagi VADER tetapi bullish bagi emas). Hanya ditampilkan, tidak mengubah angka.
 
-## Setup (sekali saja)
+## Hasil yang jujur
 
-### 1. Buat repo Public di GitHub dan unggah folder ini
+Uji walk-forward pada 120 sesi emas asli (21 November 2026, `tools/backtest.py`):
 
-### 2. Gmail App Password
-Akun Google harus memakai verifikasi 2 langkah. Buka *Akun Google → Keamanan → Sandi aplikasi*, buat satu sandi (16 karakter).
+| Ukuran | Hasil | Arti |
+|---|---|---|
+| Close di dalam kisaran 70% | 63,3% (±8,6%) | wajar, sedikit di bawah target |
+| High di dalam kisaran | 68,3% (±8,3%) | cocok |
+| Low di dalam kisaran | 65,8% (±8,5%) | cocok |
+| Pinball loss vs random walk + EWMA | −0,5% | setara, model tidak lebih baik untuk Close |
+| Direction Brier | 0,2484 (acak = 0,2500) | **tidak ada kemampuan menebak arah** |
+| Ekstrapolasi tren penuh | Brier 0,2488, 2 panggilan arah, 1 benar | tidak memperbaiki apa pun |
 
-### 3. API key Twelve Data
-Daftar gratis di twelvedata.com. Paket gratis cukup: bot memakai sekitar 4 sampai 5 credits per hari dari kuota 800. Baca syarat penggunaan paket gratis, dan jangan menaruh data harga mentah di repo Public.
+Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Low**, bukan pada tebakan arah. Label Bullish atau Bearish hampir tidak pernah muncul, dan itu disengaja: ambang tidak diturunkan demi menghasilkan sinyal palsu. Angka di atas dapat berubah saat diuji ulang; akurasi live ada di ledger.
 
-### 4. GitHub Secrets
+## Mulai cepat
+
+### 1. Siapkan akun dan kunci
+- **Twelve Data:** daftar gratis di twelvedata.com, ambil API key. Paket gratis memadai (± 4 sampai 5 credits per hari dari 800).
+- **Gmail:** aktifkan verifikasi 2 langkah, lalu buat *Sandi aplikasi* (16 karakter).
+
+### 2. GitHub Secrets
 Repo → *Settings → Secrets and variables → Actions → New repository secret*:
 
 | Nama | Isi |
 |---|---|
 | `TWELVEDATA_API_KEY` | API key Twelve Data |
-| `GMAIL_USER` | alamat Gmail pengirim |
-| `GMAIL_APP_PASSWORD` | sandi aplikasi 16 karakter (tanpa spasi) |
-| `EMAIL_TO` | alamat penerima (boleh beberapa, pisahkan koma) |
+| `GMAIL_USER` | Gmail pengirim |
+| `GMAIL_APP_PASSWORD` | sandi aplikasi (tanpa spasi) |
+| `EMAIL_TO` | penerima, boleh beberapa dipisah koma (saling tersembunyi) |
 
-Jangan menulis kunci atau alamat email di kode, log, atau commit (repo ini Public).
+### 3. Jalankan
+*Actions → Au-tomatic Daily → Run workflow*. Pertama dengan **dry_run dicentang** (memeriksa seluruh jalur tanpa mengirim email dan tanpa mencetak level harga), lalu tanpa centang untuk mengirim email sungguhan. Jadwal otomatis: **Minggu sampai Kamis 22:30 UTC** (Senin sampai Jumat 05:30 WIB).
 
-### 5. Uji manual
-*Actions → Au-tomatic Daily → Run workflow*:
-1. **dry_run = true**: unduh artifact `email-preview` dan cek `preview.html`.
-2. **dry_run = false**: email sungguhan masuk ke inbox.
-
-Jadwal otomatis: **Minggu–Kamis 22:30 UTC** (= Senin–Jumat 05:30 WIB). GitHub bisa menunda cron beberapa menit.
-
-## Menjalankan di komputer sendiri (Windows PowerShell)
+### Di komputer sendiri (Windows PowerShell)
 
 ```powershell
-cd "C:\Users\...\au-tomatic"
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt        # gunakan "python -m pip", bukan "pip"
+python -m pip install -r requirements.txt        # pakai "python -m pip", bukan "pip"
 python -m pytest -q                              # tes offline, tanpa internet
 
 $env:TWELVEDATA_API_KEY = "key-anda"             # hanya berlaku di jendela ini
-python main.py --dry-run                         # hasil di out\preview.html
+python main.py --dry-run --explain               # out\preview.html dan out\report.html
 ```
 
-Opsi `main.py`:
-
-| Opsi | Fungsi |
+| Opsi `main.py` | Fungsi |
 |---|---|
-| `--dry-run` | tidak mengirim email, hanya menulis `out/preview.html` dan `preview.txt` |
+| `--dry-run` | tidak mengirim email, hanya menulis `out/preview.*` |
+| `--explain` | juga menulis `out/report.html`: setiap langkah hitung dengan angka dan grafik |
 | `--now 2026-11-13T22:30:00Z` | memutar ulang momen tertentu |
-| `--data-check` | hanya email tes data (Sprint 1) |
-| `--no-macro` | tanpa fitur DXY/US10Y |
-| `--event` | anggap hari ini hari event high-impact (kisaran dilebarkan) |
-| `--explain` | tulis juga `out/report.html` (laporan perhitungan lengkap dengan grafik) dan `report.txt` |
+| `--no-news`, `--no-macro`, `--no-ledger` | matikan radar berita, fitur DXY/US10Y, atau ledger |
+| `--event` | anggap hari ini hari event (kisaran dilebarkan) |
+| `--data-check` | hanya email tes data |
 
-## Melihat perhitungan komputasinya
+## Alat evaluasi
 
-```powershell
-python main.py --dry-run --explain
-```
+| Perintah | Fungsi |
+|---|---|
+| `python tools/backtest.py --sessions 120` | uji walk-forward di data asli (3 sampai 4 credits) |
+| `... --set model.drift.k_kalman=1 --set model.drift.cap_sigma_mult=10` | uji ekstrapolasi tren penuh |
+| `python tools/event_study.py` | ukur apakah hari FOMC lebih bergejolak, dan sarankan `event_extra_var` |
+| `python tools/compare_mt5.py XAUUSD_D1.csv` | bandingkan dengan ekspor D1 dari MT5 Anda |
+| `python tools/probe_news.py` | cek feed kalender dan berita mana yang hidup di komputer Anda |
+| `python tools/probe_twelvedata.py`, `probe_symbols.py` | uji sumber data |
 
-Buka `out\report.html`. Isinya setiap langkah dengan angka dan grafik: ekstrapolasi tren Kalman (kecepatan, galat baku, z, tebakan satu hari), probabilitas dan matriks transisi rezim HMM, campuran volatilitas dan drift beserta batasnya, parameter lompatan, profil volatilitas per jam, dan 10.000 jalur Monte Carlo beserta sebarannya.
+Ekspor MT5: *View → Symbols → tab Bars* → simbol emas, D1, 60+ hari → *Export Bars*.
 
-## Uji kualitas model di data asli (WAJIB sebelum dipercaya)
+## Ledger akurasi live
 
-```powershell
-python tools/backtest.py --sessions 120
-```
-
-Memakai riwayat Twelve Data asli (3 sampai 4 credits, ± 1 menit). Model dijalankan seolah-olah pada pagi hari itu, hanya memakai data yang tersedia saat itu, lalu dibandingkan dengan kenyataan. Cara membaca:
-
-- **inside ≈ 70%** untuk Close/High/Low. Untuk 120 sesi, 60 sampai 80% masih wajar.
-- **Pinball gain vs baseline positif** berarti model mengalahkan random walk sederhana. Sekitar 0 berarti setara. Negatif berarti model lebih buruk, dan itu temuan penting.
-- **Direction Brier mendekati 0,25** berarti tidak ada kemampuan menebak arah. Itu **normal** untuk emas harian.
-- Tabel per sesi tersimpan di `out/backtest_table.csv`.
-- **Uji ekstrapolasi tren murni** (tanpa pengecilan drift), lalu bandingkan dengan hasil bawaan:
-  `python tools/backtest.py --sessions 120 --set model.drift.k_kalman=1 --set model.drift.cap_sigma_mult=10`
-
-## Validasi terhadap chart MT5
-
-```powershell
-python tools/compare_mt5.py "C:\path\XAUUSD_D1.csv" --days 30
-python tools/probe_twelvedata.py "C:\path\XAUUSD_D1.csv"     # uji sumber spot + kedalaman riwayat
-python tools/probe_symbols.py "C:\path\XAUUSD_D1.csv"        # uji simbol Yahoo
-```
-
-Ekspor dari MT5: *View → Symbols → tab Bars* → simbol emas, timeframe D1, 60+ hari → *Request* → *Export Bars* (CSV).
+Setiap run sungguhan menambah satu baris ke `data/predictions_log.csv`, dan workflow meng-commit-nya. Esok harinya baris itu "diselesaikan": apakah close, high, dan low jatuh di dalam kisaran. Isi ledger aman untuk repo Public: hanya selisih relatif (pecahan), probabilitas, rezim, dan penanda 0/1. **Tidak ada harga mentah.** Commit harian juga menjaga jadwal tetap aktif (GitHub mematikan jadwal di repo Public setelah 60 hari tanpa aktivitas).
 
 ## Struktur
 
 ```text
 main.py                     # orkestrator
-config.yaml                 # batas candle, parameter model, SMTP
-src/data_fetcher.py         # Twelve Data + Yahoo, candle NY-close, validasi, fallback, makro
-src/hmm.py                  # Gaussian HMM (numpy, tanpa hmmlearn)
-src/signal_and_regime.py    # Kalman local linear trend, fitur, pemetaan rezim
-src/quant_engine.py         # volatilitas, lompatan, Monte Carlo, bias
-src/evaluation.py           # walk-forward: coverage, pinball, Brier
+config.yaml                 # semua parameter
+src/data_fetcher.py         # Twelve Data + Yahoo, candle NY-close, validasi, fallback
+src/hmm.py                  # Gaussian HMM (numpy)
+src/signal_and_regime.py    # Kalman, fitur, pemetaan rezim
+src/quant_engine.py         # volatilitas, lompatan, event terjadwal, Monte Carlo
+src/news_sentinel.py        # kalender, RSS, kamus sentimen emas
+src/ledger.py               # ledger prediksi + akurasi live
+src/evaluation.py           # walk-forward dan event study
 src/report.py               # laporan komputasi (angka + grafik)
 src/email_dispatcher.py     # email HTML + teks, Gmail SMTP
-tests/                      # 36 tes offline
-tools/                      # backtest, compare_mt5, probe_twelvedata, probe_symbols
-.github/workflows/          # daily_xauusd.yml (jadwal) dan ci.yml (tes)
+tests/                      # 79 tes offline (tanpa jaringan)
+tools/                      # backtest, event_study, probe, compare_mt5
+.github/workflows/          # daily_xauusd.yml (jadwal), ci.yml (tes)
 ```
 
-## Keterbatasan yang diketahui
+## Penggunaan data dan privasi
 
-- Data gratis tidak resmi dan bisa terlambat atau diblokir. Itu sebabnya ada retry, fallback bertingkat, dan email error (tidak pernah mengirim angka basi).
-- Model dibuktikan terkalibrasi pada data **sintetis**. Pembuktian pada data asli adalah `tools/backtest.py`.
-- Fallback `GC=F` memiliki basis harga berbeda dari spot. Pakai kisaran relatif terhadap open MT5 Anda.
-- Radar berita dan kalender ekonomi belum aktif (Sprint 4). Hari FOMC/CPI/NFP, kisaran bisa lebih lebar dari yang ditampilkan.
-- Cron GitHub di repo Public dinonaktifkan setelah 60 hari tanpa aktivitas repo. Commit ledger harian (Sprint 3) akan mencegahnya.
+- Paket gratis Twelve Data hanya untuk **penggunaan pribadi dan non-komersial**, dan tidak mengizinkan menampilkan atau mendistribusikan datanya ke pihak ketiga. Karena itu email hanya dikirim ke akun milik sendiri dan **repo ini tidak menyimpan data harga mentah**.
+- Log GitHub Actions di repo Public bersifat publik, jadi log hanya memuat angka relatif. Workflow tidak mengunggah file hasil.
+- Jangan menaruh kunci, sandi, atau alamat email di kode, log, atau commit. Periksa syarat terbaru di twelvedata.com sebelum membagikan hasil kepada orang lain.
+
+## Keterbatasan
+
+- Data gratis tidak resmi dan bisa terlambat, kosong, atau diblokir. Karena itu ada retry, fallback bertingkat, dan email error.
+- Model terkalibrasi pada data sintetis dan cukup baik pada 120 sesi emas asli, tetapi sampelnya kecil. Pantau akurasi live di ledger.
+- Pengaruh event dikalibrasi dari hari FOMC yang hanya sekitar 20 sampai 23 hari, jadi selang kepercayaannya lebar. `event_extra_var` bawaan (0,5) adalah prior yang wajar, bukan hasil pasti.
+- Feed berita dan kalender gratis bisa berubah atau mati. Feed yang gagal dilewati dan email menyebutkannya.
+- Sentimen berita memakai kamus heuristik yang tidak bisa divalidasi (tidak ada arsip berita historis), sehingga hanya ditampilkan.
 
 ## Roadmap
 
-1. Sprint 1: data + validasi + email tes (selesai)
-2. **Sprint 2: Kalman + HMM + Monte Carlo + email prakiraan (ini)**
-3. Sprint 3: ledger harian + coverage live di email + email error lengkap
-4. Sprint 4: radar berita/kalender + README portofolio + lisensi
-5. Sprint 5 (opsional): Ridge/LightGBM + atribusi faktor, hanya jika mengalahkan baseline
+1. Selesai: data, validasi, email, model, ledger, radar berita dan kalender.
+2. Opsional: Ridge atau LightGBM dengan fitur makro (DXY, US10Y, suku bunga riil), hanya jika mengalahkan baseline di backtest.
+
+## Lisensi
+
+MIT. Lihat `LICENSE`.
