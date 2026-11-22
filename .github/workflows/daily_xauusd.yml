@@ -9,12 +9,12 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (do not send email; upload preview as artifact)"
+        description: "Dry run (checks the pipeline end to end, sends no email, prints no price levels)"
         type: boolean
         default: true
 
 permissions:
-  contents: read        # Sprint 3 will raise this to `write` to commit the ledger
+  contents: write       # needed to commit the forecast ledger (data/predictions_log.csv)
 
 concurrency:
   group: xauusd-daily
@@ -51,9 +51,16 @@ jobs:
             python main.py
           fi
 
-      - name: Upload dry-run preview
-        if: ${{ inputs.dry_run == true }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: email-preview
-          path: out/
+      - name: Commit ledger
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f data/predictions_log.csv ]; then git add data/predictions_log.csv; fi
+          if git diff --cached --quiet; then
+            echo "No ledger changes."
+          else
+            git commit -m "ledger: $(date -u +%F)"
+            git pull --rebase
+            git push
+          fi
