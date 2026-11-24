@@ -558,6 +558,138 @@ def test_smtp_credentials_are_normalised():
     assert _FlakySMTP.last["login"] == ("bot@gmail.com", "abcdefghijklmnop")
 
 
+# ------------------------------------------------- Gmail API transport (HTTPS)
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body or {}
+
+    def json(self):
+        return self._body
+
+
+class _ScriptedHTTP:
+    """Fake requests.post: routes by URL; `send_script` is a list of responses/exceptions for send calls."""
+    def __init__(self, token=None, send_script=None):
+        self.token = token or _Resp(200, {"access_token": "AT-123"})
+        self.send_script = list(send_script or [])
+        self.calls: list = []
+
+    def __call__(self, url, **kw):
+        self.calls.append((url, kw))
+        if url.endswith("/token"):
+            return self.token
+        item = self.send_script.pop(0) if self.send_script else _Resp(200, {"id": "m1"})
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _api_send(http, **kw):
+    from src.email_dispatcher import send_email_gmail_api
+    sleeps: list = []
+    kw.setdefault("to", "one@gmail.com, two@gmail.com")
+    try:
+        res = send_email_gmail_api("Subj", "<b>x</b>", "x", client_id="cid", client_secret="csec",
+                                   refresh_token="RT-secret", sleep=sleeps.append, post=http, **kw)
+    except Exception as exc:  # noqa: BLE001
+        res = exc
+    return res, sleeps
+
+
+def _decode_raw(call):
+    import base64
+    return base64.urlsafe_b64decode(call[1]["json"]["raw"]).decode("utf-8", "replace")
+
+
+def test_gmail_api_sends_one_private_copy_per_recipient_with_one_token_call():
+    http = _ScriptedHTTP()
+    res, _ = _api_send(http)
+    assert res == (2, 0), res
+    urls = [c[0] for c in http.calls]
+    assert urls.count("https://oauth2.googleapis.com/token") == 1 and len(urls) == 3
+    sends = [c for c in http.calls if "messages/send" in c[0]]
+    assert all(c[1]["headers"]["Authorization"] == "Bearer AT-123" for c in sends)
+    m1, m2 = _decode_raw(sends[0]), _decode_raw(sends[1])
+    assert "one@gmail.com" in m1 and "two@gmail.com" not in m1      # nobody sees the other address
+    assert "two@gmail.com" in m2 and "one@gmail.com" not in m2
+
+
+def test_gmail_api_shared_header_when_recipients_are_not_hidden():
+    http = _ScriptedHTTP()
+    res, _ = _api_send(http, hide_recipients=False)
+    assert res == (2, 0)
+    sends = [c for c in http.calls if "messages/send" in c[0]]
+    assert len(sends) == 1
+    m = _decode_raw(sends[0])
+    assert "one@gmail.com" in m and "two@gmail.com" in m
+
+
+def test_gmail_api_refresh_token_rejected_is_a_clear_non_retried_error():
+    from src.email_dispatcher import EmailAuthError
+    http = _ScriptedHTTP(token=_Resp(400, {"error": "invalid_grant", "error_description": "Token has been expired"}))
+    res, sleeps = _api_send(http)
+    assert isinstance(res, EmailAuthError) and "invalid_grant" in str(res) and "In production" in str(res)
+    assert "RT-secret" not in str(res) and len(http.calls) == 1 and sleeps == []
+
+
+def test_gmail_api_retries_5xx_and_429_then_succeeds_and_gives_up_with_growing_pause():
+    from src.email_dispatcher import EmailTransportError
+    http = _ScriptedHTTP(send_script=[_Resp(503), _Resp(429), _Resp(200), _Resp(200)])
+    res, sleeps = _api_send(http)
+    assert res == (2, 0) and sleeps == [5.0, 15.0], (res, sleeps)
+
+    http2 = _ScriptedHTTP(send_script=[_Resp(500)] * 3)
+    res2, sleeps2 = _api_send(http2, to="one@gmail.com")
+    assert isinstance(res2, EmailTransportError) and sleeps2 == [5.0, 15.0]
+
+
+def test_gmail_api_retries_network_errors():
+    import requests
+    http = _ScriptedHTTP(send_script=[requests.ConnectionError("boom"), _Resp(200)])
+    res, sleeps = _api_send(http, to="one@gmail.com")
+    assert res == (1, 0) and sleeps == [5.0]
+
+
+def test_gmail_api_one_rejected_recipient_does_not_stop_the_others():
+    http = _ScriptedHTTP(send_script=[_Resp(400, {"error": {"status": "INVALID_ARGUMENT"}}), _Resp(200)])
+    res, _ = _api_send(http)
+    assert res == (1, 1), res
+
+
+def test_gmail_api_permission_denied_raises_auth_error():
+    from src.email_dispatcher import EmailAuthError
+    http = _ScriptedHTTP(send_script=[_Resp(403, {"error": {"status": "PERMISSION_DENIED"}})])
+    res, _ = _api_send(http)
+    assert isinstance(res, EmailAuthError) and "gmail.send" in str(res)
+
+
+def test_gmail_api_logs_never_contain_tokens_or_addresses():
+    import logging
+    records: list = []
+
+    class H(logging.Handler):
+        def emit(self, rec):
+            records.append(rec.getMessage())
+
+    lg = logging.getLogger("src.email_dispatcher")
+    h = H()
+    lg.addHandler(h)
+    try:
+        _api_send(_ScriptedHTTP(send_script=[_Resp(503), _Resp(400, {"error": {"status": "X"}}), _Resp(200)]))
+    finally:
+        lg.removeHandler(h)
+    joined = " ".join(records)
+    assert records and "RT-secret" not in joined and "AT-123" not in joined and "@gmail.com" not in joined
+
+
+def test_gmail_api_credentials_need_all_three_and_ignore_stray_whitespace():
+    from src.email_dispatcher import gmail_api_credentials
+    full = {"GMAIL_OAUTH_CLIENT_ID": " a.apps ", "GMAIL_OAUTH_CLIENT_SECRET": "b\n", "GMAIL_OAUTH_REFRESH_TOKEN": "c d"}
+    assert gmail_api_credentials(full) == ("a.apps", "b", "cd")
+    assert gmail_api_credentials({**full, "GMAIL_OAUTH_REFRESH_TOKEN": ""}) is None
+    assert gmail_api_credentials({}) is None
+
+
 # ------------------------------------------------- US-holiday awareness (A1)
 HOL_NOW = utc("2026-01-15 22:30")          # Thu 17:30 EST; newest complete session = 2026-01-15
 HOL_LABEL = pd.Timestamp("2026-01-15")

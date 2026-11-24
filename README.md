@@ -110,12 +110,18 @@ python main.py --dry-run --explain               # out\preview.html dan out\repo
 | `python tools/probe_news.py` | cek feed kalender dan berita mana yang hidup di komputer Anda |
 | `python tools/probe_twelvedata.py`, `probe_symbols.py` | uji sumber data |
 | `python tools/probe_holidays.py` | hitung jumlah bar per jam pada sesi hari libur AS di riwayat Twelve Data (hanya angka bar, tanpa harga) |
+| `python tools/gmail_oauth_setup.py` | sekali pakai di komputer Anda: membuat refresh token Gmail API (izin kirim saja) untuk secret `GMAIL_OAUTH_REFRESH_TOKEN` |
+| `python tools/probe_smtp.py` | diagnosis login SMTP Gmail (hanya mencetak tahap dan jenis error) |
 
 Ekspor MT5: *View → Symbols → tab Bars* → simbol emas, D1, 60+ hari → *Export Bars*.
 
 ## Ledger akurasi live
 
 Setiap run sungguhan menambah satu baris ke `data/predictions_log.csv`, dan workflow meng-commit-nya. Esok harinya baris itu "diselesaikan": apakah close, high, dan low jatuh di dalam kisaran. Isi ledger aman untuk repo Public: hanya selisih relatif (pecahan), probabilitas, rezim, dan penanda 0/1. **Tidak ada harga mentah.** Commit harian juga menjaga jadwal tetap aktif (GitHub mematikan jadwal di repo Public setelah 60 hari tanpa aktivitas).
+
+## Pengiriman email
+
+Gmail menutup login SMTP dari server GitHub (dibuktikan dengan `tools/probe_smtp.py`: akun uji palsu pun diputus), jadi jalur utama adalah **Gmail API lewat HTTPS** dengan izin `gmail.send` saja. Secret: `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`, dan `EMAIL_TO`. Layar persetujuan OAuth harus berstatus **In production**; pada status Testing refresh token mati tiap 7 hari. Bila ketiga secret OAuth tidak ada, bot memakai SMTP (`GMAIL_USER` + `GMAIL_APP_PASSWORD`), berguna untuk uji dari komputer sendiri.
 
 ## Struktur
 

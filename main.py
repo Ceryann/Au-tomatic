@@ -33,7 +33,11 @@ from src.email_dispatcher import (
     build_data_check_email,
     build_error_email,
     build_forecast_email,
+    EmailAuthError,
+    EmailTransportError,
+    gmail_api_credentials,
     send_email,
+    send_email_gmail_api,
 )
 from src.ledger import live_accuracy, load_ledger, save_ledger, settle, upsert_forecast
 from src.news_sentinel import build_news_report
@@ -142,27 +146,40 @@ def main(argv=None) -> int:
         user = os.environ.get("GMAIL_USER")
         password = os.environ.get("GMAIL_APP_PASSWORD")
         to = os.environ.get("EMAIL_TO")
-        if not (user and password and to):
-            log.error("Missing GMAIL_USER / GMAIL_APP_PASSWORD / EMAIL_TO environment variables.")
+        api_creds = gmail_api_credentials(os.environ)     # Gmail API (HTTPS) is preferred when configured
+        if not to or not (api_creds or (user and password)):
+            log.error("Missing EMAIL_TO and either the GMAIL_OAUTH_* secrets (Gmail API) "
+                      "or GMAIL_USER + GMAIL_APP_PASSWORD (SMTP).")
             return 2
+        ecfg = cfg["email"]
         try:
-            ok, bad = send_email(
-                subject, html_body, text_body,
-                user=user, password=password, to=to,
-                host=cfg["email"]["smtp_host"], port=int(cfg["email"]["smtp_port"]),
-                hide_recipients=bool(cfg["email"].get("hide_recipients", True)),
-                retries=int(cfg["email"].get("retries", 3)),
-                retry_delay_s=float(cfg["email"].get("retry_delay_s", 5)),
-                fallback_starttls=bool(cfg["email"].get("fallback_starttls_587", True)),
-            )
+            if api_creds:
+                ok, bad = send_email_gmail_api(
+                    subject, html_body, text_body,
+                    client_id=api_creds[0], client_secret=api_creds[1], refresh_token=api_creds[2], to=to,
+                    hide_recipients=bool(ecfg.get("hide_recipients", True)),
+                    retries=int(ecfg.get("retries", 3)), retry_delay_s=float(ecfg.get("retry_delay_s", 5)),
+                )
+            else:
+                ok, bad = send_email(
+                    subject, html_body, text_body,
+                    user=user, password=password, to=to,
+                    host=ecfg["smtp_host"], port=int(ecfg["smtp_port"]),
+                    hide_recipients=bool(ecfg.get("hide_recipients", True)),
+                    retries=int(ecfg.get("retries", 3)),
+                    retry_delay_s=float(ecfg.get("retry_delay_s", 5)),
+                    fallback_starttls=bool(ecfg.get("fallback_starttls_587", True)),
+                )
         except ValueError as exc:
             log.error("%s Check the EMAIL_TO secret.", exc)
             return 2
-        except smtplib.SMTPAuthenticationError:
-            log.error("Gmail rejected the login. Check GMAIL_USER and GMAIL_APP_PASSWORD "
-                      "(16-character app password of the same account, 2-Step Verification on).")
+        except EmailAuthError as exc:
+            log.error("%s", exc)
             return 1
-        except (smtplib.SMTPException, OSError) as exc:
+        except smtplib.SMTPAuthenticationError:
+            log.error("Gmail rejected the SMTP login. Check GMAIL_USER (full address) and GMAIL_APP_PASSWORD.")
+            return 1
+        except (EmailTransportError, smtplib.SMTPException, OSError) as exc:
             log.error("Email could not be sent after retries (%s). Nothing was recorded in the ledger.",
                       type(exc).__name__)
             return 1

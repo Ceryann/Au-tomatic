@@ -6,6 +6,7 @@ final single-column, 600px, inline-CSS design so Sprint 2 only swaps the content
 
 from __future__ import annotations
 
+import base64
 import html
 import logging
 import re
@@ -384,3 +385,126 @@ def send_email(
             sleep(retry_delay_s * 3 ** (attempt - 1))
     assert last_exc is not None
     raise last_exc
+
+
+# --------------------------------------------------------------------------
+# Gmail API over HTTPS (used when Google drops SMTP logins from CI runners)
+# --------------------------------------------------------------------------
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+
+class EmailAuthError(RuntimeError):
+    """Credentials/permission problem that retrying cannot fix (message says what to redo)."""
+
+
+class EmailTransportError(RuntimeError):
+    """Network or server trouble that persisted after all retries."""
+
+
+def gmail_api_credentials(env) -> tuple[str, str, str] | None:
+    """(client_id, client_secret, refresh_token) from the environment, or None if any is missing."""
+    keys = ("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN")
+    vals = tuple("".join(str(env.get(k, "")).split()) for k in keys)
+    return vals if all(vals) else None
+
+
+def _mime(subject: str, html_body: str, text_body: str, to_header: str) -> bytes:
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["To"] = to_header            # Gmail fills in From with the authenticated account
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    return msg.as_bytes()
+
+
+def _google_error_code(resp) -> str:
+    """Only the short machine code of a Google error (never tokens, never descriptions)."""
+    try:
+        err = resp.json().get("error")
+        return str(err.get("status") if isinstance(err, dict) else err)[:60]
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def send_email_gmail_api(
+    subject: str,
+    html_body: str,
+    text_body: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    to: str,
+    hide_recipients: bool = True,
+    retries: int = 3,
+    retry_delay_s: float = 5.0,
+    sleep=time.sleep,
+    post=None,
+) -> tuple[int, int]:
+    """Send through the Gmail API (HTTPS). Returns (accepted, refused) like `send_email`.
+
+    With `hide_recipients` each recipient gets their own message addressed only to them, so
+    nobody sees anyone else's address. Transient failures (network, 429, 5xx) are retried
+    with growing pauses; an expired/revoked token or missing permission raises EmailAuthError
+    at once. A 400 for one recipient counts as refused and does not stop the others.
+    Never logs addresses, tokens or Google's error descriptions.
+    """
+    import requests
+
+    post = post or requests.post
+    recipients = parse_recipients(to)
+    if not recipients:
+        raise ValueError("EMAIL_TO contains no valid email address.")
+
+    def call(url: str, **kw):
+        last: Exception | None = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                resp = post(url, timeout=30, **kw)
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last = EmailTransportError(f"HTTP {resp.status_code}")
+                    log.warning("Gmail API attempt %d/%d: HTTP %d.", attempt, retries, resp.status_code)
+                else:
+                    return resp
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last = exc
+                log.warning("Gmail API attempt %d/%d: %s.", attempt, retries, type(exc).__name__)
+            if attempt < retries:
+                sleep(retry_delay_s * 3 ** (attempt - 1))
+        raise EmailTransportError(f"Gmail API unreachable after {retries} attempts "
+                                  f"({type(last).__name__}).") from last
+
+    tok = call(TOKEN_URL, data={
+        "client_id": client_id, "client_secret": client_secret,
+        "refresh_token": refresh_token, "grant_type": "refresh_token",
+    })
+    if tok.status_code != 200:
+        code = _google_error_code(tok)
+        raise EmailAuthError(
+            f"Google refused the OAuth refresh token ({code}). The token is expired or revoked, or the "
+            f"client id/secret is wrong: if the consent screen is still in 'Testing', publish it "
+            f"('In production') and run tools/gmail_oauth_setup.py again."
+        )
+    access = tok.json().get("access_token")
+    if not access:
+        raise EmailAuthError("Google returned no access token.")
+    headers = {"Authorization": f"Bearer {access}", "Content-Type": "application/json"}
+
+    messages = ([(r, r) for r in recipients] if hide_recipients
+                else [(", ".join(recipients), None)])       # (To header, single recipient or None)
+    accepted = refused = 0
+    for to_header, single in messages:
+        raw = base64.urlsafe_b64encode(_mime(subject, html_body, text_body, to_header)).decode("ascii")
+        resp = call(SEND_URL, headers=headers, json={"raw": raw})
+        if resp.status_code == 200:
+            accepted += 1 if single else len(recipients)
+        elif resp.status_code in (401, 403):
+            raise EmailAuthError(
+                f"Gmail API denied sending (HTTP {resp.status_code}, {_google_error_code(resp)}). Enable "
+                f"the Gmail API in the Google Cloud project and grant the gmail.send permission."
+            )
+        else:
+            log.error("Gmail API rejected one message (HTTP %d, %s).", resp.status_code, _google_error_code(resp))
+            refused += 1 if single else len(recipients)
+    return accepted, refused
