@@ -409,6 +409,12 @@ def gmail_api_credentials(env) -> tuple[str, str, str] | None:
     return vals if all(vals) else None
 
 
+def gmail_api_missing(env) -> list[str]:
+    """Names of the Gmail OAuth variables that are absent or empty (for a precise log line)."""
+    keys = ("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN")
+    return [k for k in keys if not "".join(str(env.get(k, "")).split())]
+
+
 def _mime(subject: str, html_body: str, text_body: str, to_header: str) -> bytes:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject

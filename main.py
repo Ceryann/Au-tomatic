@@ -36,6 +36,7 @@ from src.email_dispatcher import (
     EmailAuthError,
     EmailTransportError,
     gmail_api_credentials,
+    gmail_api_missing,
     send_email,
     send_email_gmail_api,
 )
@@ -152,6 +153,18 @@ def main(argv=None) -> int:
                       "or GMAIL_USER + GMAIL_APP_PASSWORD (SMTP).")
             return 2
         ecfg = cfg["email"]
+        if api_creds:
+            log.info("Email transport: Gmail API (HTTPS).")
+        else:
+            missing = gmail_api_missing(os.environ)
+            if len(missing) < 3:
+                log.warning("Gmail OAuth is only partly configured (missing in this run: %s); "
+                            "falling back to SMTP, which Google closes from GitHub. In the repo, check the "
+                            "workflow passes these secrets and the secrets are not empty.", ", ".join(missing))
+            else:
+                log.warning("No GMAIL_OAUTH_* variables reached this run; using SMTP, which Google closes "
+                            "from GitHub. Update .github/workflows/daily_xauusd.yml and push.")
+            log.info("Email transport: SMTP.")
         try:
             if api_creds:
                 ok, bad = send_email_gmail_api(

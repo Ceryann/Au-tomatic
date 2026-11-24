@@ -690,6 +690,13 @@ def test_gmail_api_credentials_need_all_three_and_ignore_stray_whitespace():
     assert gmail_api_credentials({}) is None
 
 
+def test_gmail_api_missing_names_only_the_absent_variables():
+    from src.email_dispatcher import gmail_api_missing
+    assert gmail_api_missing({}) == ["GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN"]
+    env = {"GMAIL_OAUTH_CLIENT_ID": "a", "GMAIL_OAUTH_CLIENT_SECRET": "  ", "GMAIL_OAUTH_REFRESH_TOKEN": "c"}
+    assert gmail_api_missing(env) == ["GMAIL_OAUTH_CLIENT_SECRET"]
+
+
 # ------------------------------------------------- US-holiday awareness (A1)
 HOL_NOW = utc("2026-01-15 22:30")          # Thu 17:30 EST; newest complete session = 2026-01-15
 HOL_LABEL = pd.Timestamp("2026-01-15")
