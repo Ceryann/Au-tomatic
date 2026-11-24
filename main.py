@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import smtplib
 import sys
 from pathlib import Path
 
@@ -150,10 +151,21 @@ def main(argv=None) -> int:
                 user=user, password=password, to=to,
                 host=cfg["email"]["smtp_host"], port=int(cfg["email"]["smtp_port"]),
                 hide_recipients=bool(cfg["email"].get("hide_recipients", True)),
+                retries=int(cfg["email"].get("retries", 3)),
+                retry_delay_s=float(cfg["email"].get("retry_delay_s", 5)),
+                fallback_starttls=bool(cfg["email"].get("fallback_starttls_587", True)),
             )
         except ValueError as exc:
             log.error("%s Check the EMAIL_TO secret.", exc)
             return 2
+        except smtplib.SMTPAuthenticationError:
+            log.error("Gmail rejected the login. Check GMAIL_USER and GMAIL_APP_PASSWORD "
+                      "(16-character app password of the same account, 2-Step Verification on).")
+            return 1
+        except (smtplib.SMTPException, OSError) as exc:
+            log.error("Email could not be sent after retries (%s). Nothing was recorded in the ledger.",
+                      type(exc).__name__)
+            return 1
         # intentionally no addresses in logs (public repo)
         log.info("Email sent to %d recipient(s).", ok)
         if bad:

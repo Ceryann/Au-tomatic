@@ -25,6 +25,7 @@ from src import news_sentinel as ns_mod  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     DataError,
     build_ny_close_candles,
+    drop_empty_holiday_sessions,
     get_gold_bundle,
     last_complete_label,
     session_label_for,
@@ -461,6 +462,221 @@ def test_no_valid_recipient_raises_clear_error():
         raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "no valid email" in str(exc)
+
+
+# ------------------------------------------------- SMTP resilience (Gmail dropped login from CI)
+class _FlakySMTP:
+    """Fake SMTP whose behaviour is scripted per class: fail_logins = list of exceptions to raise."""
+    events: list = []
+    fail_logins: list = []
+    last: dict = {}
+
+    def __init__(self, host, port, context=None, timeout=None):
+        self.port = port
+        self.mode = "ssl" if context is not None and not hasattr(self, "_tls") else "plain"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def ehlo(self):
+        pass
+
+    def starttls(self, context=None):
+        self._tls = True
+        self.mode = "starttls"
+
+    def login(self, user, password):
+        _FlakySMTP.events.append(self.port)
+        _FlakySMTP.last["login"] = (user, password)
+        if _FlakySMTP.fail_logins and self.port in (465, 587):
+            exc = _FlakySMTP.fail_logins[0]
+            if exc[1] == "always" or exc[1] == self.port:
+                if exc[1] != "always":
+                    _FlakySMTP.fail_logins.pop(0)
+                raise exc[0]
+
+    def sendmail(self, sender, recipients, message):
+        _FlakySMTP.last["recipients"] = list(recipients)
+        return {}
+
+
+def _send_flaky(fail_logins, **kw):
+    import smtplib
+    from src.email_dispatcher import send_email
+
+    _FlakySMTP.events, _FlakySMTP.fail_logins, _FlakySMTP.last = [], list(fail_logins), {}
+    sleeps: list = []
+    o1, o2 = smtplib.SMTP_SSL, smtplib.SMTP
+    smtplib.SMTP_SSL = smtplib.SMTP = _FlakySMTP
+    try:
+        kw.setdefault("password", "pw")
+        res = send_email("S", "<b>x</b>", "x", user="bot@gmail.com", to="a@gmail.com, b@gmail.com",
+                         sleep=sleeps.append, **kw)
+        return res, sleeps
+    except Exception as exc:
+        return exc, sleeps
+    finally:
+        smtplib.SMTP_SSL, smtplib.SMTP = o1, o2
+
+
+def test_smtp_disconnect_is_retried_and_then_succeeds():
+    import smtplib
+    drop = (smtplib.SMTPServerDisconnected("Connection unexpectedly closed"), 465)
+    res, sleeps = _send_flaky([drop, drop], fallback_starttls=False)     # first two SSL logins drop
+    assert res == (2, 0), res
+    assert _FlakySMTP.events == [465, 465, 465] and sleeps == [5.0, 15.0]
+
+
+def test_smtp_falls_back_to_starttls_587_when_ssl_drops():
+    import smtplib
+    res, sleeps = _send_flaky([(smtplib.SMTPServerDisconnected("closed"), 465)])
+    assert res == (2, 0), res
+    assert _FlakySMTP.events == [465, 587] and sleeps == []              # no pause needed: fallback worked
+
+
+def test_smtp_auth_failure_is_not_retried():
+    import smtplib
+    res, sleeps = _send_flaky([(smtplib.SMTPAuthenticationError(535, b"bad credentials"), "always")])
+    assert isinstance(res, smtplib.SMTPAuthenticationError)
+    assert _FlakySMTP.events == [465] and sleeps == []
+
+
+def test_smtp_gives_up_after_retries_and_raises_last_error():
+    import smtplib
+    res, sleeps = _send_flaky([(smtplib.SMTPServerDisconnected("closed"), "always")], retries=3, retry_delay_s=5)
+    assert isinstance(res, smtplib.SMTPServerDisconnected)
+    assert len(_FlakySMTP.events) == 6                    # 3 attempts x (SSL + STARTTLS)
+    assert sleeps == [5, 15]                              # growing pause between attempts
+
+
+def test_smtp_credentials_are_normalised():
+    res, _ = _send_flaky([], password=" abcd efgh\u00a0ijkl mnop\n")
+    assert res == (2, 0)
+    assert _FlakySMTP.last["login"] == ("bot@gmail.com", "abcdefghijklmnop")
+
+
+# ------------------------------------------------- US-holiday awareness (A1)
+HOL_NOW = utc("2026-01-15 22:30")          # Thu 17:30 EST; newest complete session = 2026-01-15
+HOL_LABEL = pd.Timestamp("2026-01-15")
+
+
+def _hol_cfg(absent_ok: bool = False, name: str = "Test Holiday") -> dict:
+    cfg = load_cfg()
+    cfg["data"]["holidays"] = {"2026-01-15": {"name": name, "absent_ok": absent_ok}}
+    return cfg
+
+
+def _thin(hourly: pd.DataFrame, label: pd.Timestamp, keep_every: int) -> pd.DataFrame:
+    """Keep every n-th hourly bar of one session (24 bars -> 24/n)."""
+    lab = session_label_for(hourly.index, TZ, HOUR)
+    idx = hourly.index[lab == label]
+    return hourly.drop(index=[ts for i, ts in enumerate(idx) if i % keep_every])
+
+
+def _complete(hourly: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame:
+    c = build_ny_close_candles(hourly, TZ, HOUR, now)
+    return c[c["complete"]]
+
+
+def test_holiday_session_with_eight_bars_passes_with_warning():
+    hourly = _thin(hourly_until(HOL_NOW), HOL_LABEL, 3)
+    complete = _complete(hourly, HOL_NOW)
+    assert int(complete["bars"].iloc[-1]) == 8
+    w = validate_candles(complete, _hol_cfg(), last_complete_label(HOL_NOW, TZ, HOUR))
+    assert any("Thin liquidity" in x and "Test Holiday" in x for x in w), w
+
+
+def test_same_thin_session_on_a_normal_date_is_still_rejected():
+    hourly = _thin(hourly_until(HOL_NOW), HOL_LABEL, 3)
+    complete = _complete(hourly, HOL_NOW)
+    cfg = load_cfg()                                   # real config: 2026-01-15 is not a holiday
+    try:
+        validate_candles(complete, cfg, last_complete_label(HOL_NOW, TZ, HOUR))
+        raise AssertionError("expected DataError for 8 bars on a normal date")
+    except DataError as exc:
+        assert "hourly bars" in str(exc)
+
+
+def test_holiday_below_floor_is_still_rejected():
+    hourly = _thin(hourly_until(HOL_NOW), HOL_LABEL, 8)           # 3 bars < holiday_min_bars (6)
+    complete = _complete(hourly, HOL_NOW)
+    try:
+        validate_candles(complete, _hol_cfg(), last_complete_label(HOL_NOW, TZ, HOUR))
+        raise AssertionError("expected DataError below the holiday floor")
+    except DataError as exc:
+        assert "holiday floor" in str(exc)
+
+
+def test_absent_holiday_session_is_accepted_only_when_listed():
+    hourly = hourly_until(HOL_NOW)
+    lab = session_label_for(hourly.index, TZ, HOUR)
+    hourly = hourly[lab != HOL_LABEL]                              # no bars at all that session
+    complete = _complete(hourly, HOL_NOW)
+    expected = last_complete_label(HOL_NOW, TZ, HOUR)
+    assert complete.index[-1] == pd.Timestamp("2026-01-14")
+
+    w = validate_candles(complete, _hol_cfg(absent_ok=True), expected)
+    assert any("No candle for 2026-01-15" in x for x in w), w
+
+    for cfg in (_hol_cfg(absent_ok=False), load_cfg()):            # listed-but-strict, and unlisted
+        try:
+            validate_candles(complete, cfg, expected)
+            raise AssertionError("expected Stale data error")
+        except DataError as exc:
+            assert "Stale" in str(exc)
+
+
+def test_near_empty_absent_ok_candle_is_dropped_from_history():
+    hourly = _thin(hourly_until(HOL_NOW), HOL_LABEL, 12)           # 2 bars
+    complete = _complete(hourly, HOL_NOW)
+    kept, notes = drop_empty_holiday_sessions(complete, _hol_cfg(absent_ok=True))
+    assert HOL_LABEL not in kept.index and len(kept) == len(complete) - 1
+    assert notes and "excluded" in notes[0]
+    kept2, notes2 = drop_empty_holiday_sessions(complete, _hol_cfg(absent_ok=False))
+    assert HOL_LABEL in kept2.index and notes2 == []               # strict holidays are never dropped
+
+
+def test_bundle_accepts_thin_holiday_and_still_rejects_it_on_a_normal_day():
+    hourly = _thin(hourly_until(HOL_NOW), HOL_LABEL, 3)
+    with FakeTD(hourly):
+        b = get_gold_bundle(_hol_cfg(), now_utc=HOL_NOW)
+    assert b.candles.index[-1] == HOL_LABEL and b.quality == "nyclose_1h"
+    assert any("Thin liquidity" in x for x in b.warnings), b.warnings
+    with FakeTD(hourly):
+        try:
+            get_gold_bundle(load_cfg(), now_utc=HOL_NOW)
+            raise AssertionError("expected DataError on a normal date")
+        except DataError as exc:
+            assert "hourly bars" in str(exc)
+
+
+def test_bundle_survives_missing_holiday_session_and_notes_holiday_target():
+    # Missing session (absent_ok): the run right after it still produces a bundle.
+    hourly = hourly_until(HOL_NOW)
+    hourly = hourly[session_label_for(hourly.index, TZ, HOUR) != HOL_LABEL]
+    with FakeTD(hourly):
+        b = get_gold_bundle(_hol_cfg(absent_ok=True), now_utc=HOL_NOW)
+    assert b.candles.index[-1] == pd.Timestamp("2026-01-14")
+    assert any("No candle for 2026-01-15" in x for x in b.warnings), b.warnings
+
+    # Target session is the holiday (run the evening before): the email carries a caution note.
+    now = utc("2026-01-14 22:30")
+    with FakeTD(hourly_until(now)):
+        b2 = get_gold_bundle(_hol_cfg(), now_utc=now)
+    assert b2.target_session == HOL_LABEL
+    assert any("US holiday session" in x for x in b2.warnings), b2.warnings
+
+
+def test_holiday_config_is_sane():
+    cfg = load_cfg()
+    d = cfg["data"]
+    assert 1 <= d["holiday_min_bars"] <= d["min_bars_per_session"]
+    for key in d["holidays"]:
+        ts = pd.Timestamp(key)                         # must parse
+        assert ts.weekday() < 5, f"{key} is a weekend: sessions are only labelled on weekdays"
 
 
 if __name__ == "__main__":

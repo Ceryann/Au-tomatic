@@ -7,9 +7,11 @@ final single-column, 600px, inline-CSS design so Sprint 2 only swaps the content
 from __future__ import annotations
 
 import html
+import logging
 import re
 import smtplib
 import ssl
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
@@ -19,6 +21,12 @@ import pandas as pd
 from .data_fetcher import DataBundle
 from .news_sentinel import NewsReport
 from .quant_engine import Forecast
+
+log = logging.getLogger(__name__)
+
+# Transient network/server hiccups worth retrying (a wrong password is NOT one of them).
+_RETRYABLE = (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError,
+              ConnectionError, TimeoutError, ssl.SSLError)
 
 DISCLAIMER = "Estimasi statistik, bukan nasihat finansial."
 
@@ -319,15 +327,26 @@ def send_email(
     host: str = "smtp.gmail.com",
     port: int = 465,
     hide_recipients: bool = True,
+    retries: int = 3,
+    retry_delay_s: float = 5.0,
+    fallback_starttls: bool = True,
+    sleep=time.sleep,
 ) -> tuple[int, int]:
-    """Send a multipart/alternative message over SMTP-SSL. Never logs addresses.
+    """Send a multipart/alternative message over SMTP. Never logs addresses.
 
     Returns (accepted, refused) recipient counts. With `hide_recipients` the recipients
     are only in the SMTP envelope (like Bcc), so they cannot see each other's addresses.
+
+    Robustness (Gmail sometimes drops connections from CI runners mid-login):
+    each attempt tries SMTP-SSL on `port`, then STARTTLS on 587 when `fallback_starttls`;
+    transient errors are retried `retries` times with growing pauses. A rejected login
+    (wrong user/app password) is raised at once, because retrying cannot fix it.
     """
     recipients = parse_recipients(to)
     if not recipients:
         raise ValueError("EMAIL_TO contains no valid email address.")
+    user = user.strip()
+    password = "".join(password.split())      # app passwords have no spaces; secrets often carry stray ones
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -335,9 +354,33 @@ def send_email(
     msg["To"] = user if hide_recipients else ", ".join(recipients)
     msg.attach(MIMEText(text_body, "plain", "utf-8"))   # fallback first
     msg.attach(MIMEText(html_body, "html", "utf-8"))    # preferred part last
+    payload = msg.as_string()
 
     context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as server:
-        server.login(user, password)
-        refused = server.sendmail(user, recipients, msg.as_string()) or {}
-    return len(recipients) - len(refused), len(refused)
+    plans = [("ssl", port)] + ([("starttls", 587)] if fallback_starttls and port != 587 else [])
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        for mode, prt in plans:
+            try:
+                if mode == "ssl":
+                    server = smtplib.SMTP_SSL(host, prt, context=context, timeout=30)
+                else:
+                    server = smtplib.SMTP(host, prt, timeout=30)
+                with server:
+                    if mode == "starttls":
+                        server.ehlo()
+                        server.starttls(context=context)
+                        server.ehlo()
+                    server.login(user, password)
+                    refused = server.sendmail(user, recipients, payload) or {}
+                return len(recipients) - len(refused), len(refused)
+            except smtplib.SMTPAuthenticationError:
+                raise
+            except _RETRYABLE as exc:
+                last_exc = exc
+                log.warning("SMTP attempt %d/%d via %s:%d failed (%s).",
+                            attempt, retries, mode, prt, type(exc).__name__)
+        if attempt < retries:
+            sleep(retry_delay_s * 3 ** (attempt - 1))
+    assert last_exc is not None
+    raise last_exc

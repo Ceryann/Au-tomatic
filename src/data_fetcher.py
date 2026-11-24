@@ -94,6 +94,69 @@ def target_label(now_utc: pd.Timestamp, tz: str, cutoff_hour: int) -> pd.Timesta
 
 
 # --------------------------------------------------------------------------
+# US-holiday awareness (Task A1)
+# --------------------------------------------------------------------------
+def holiday_map(cfg: dict) -> dict[str, dict]:
+    """`data.holidays` as {"YYYY-MM-DD": {"name": str, "absent_ok": bool}} (tolerates missing key)."""
+    raw = cfg.get("data", {}).get("holidays") or {}
+    out: dict[str, dict] = {}
+    for key, val in raw.items():
+        val = val or {}
+        out[str(key)[:10]] = {
+            "name": str(val.get("name", "US holiday")),
+            "absent_ok": bool(val.get("absent_ok", False)),
+        }
+    return out
+
+
+def holiday_for(label, cfg: dict) -> Optional[dict]:
+    """Holiday entry for a session label, or None on an ordinary day."""
+    return holiday_map(cfg).get(pd.Timestamp(label).strftime("%Y-%m-%d"))
+
+
+def _previous_weekday(label: pd.Timestamp) -> pd.Timestamp:
+    cand = label - DAY
+    while cand.weekday() >= 5:
+        cand -= DAY
+    return cand
+
+
+def drop_empty_holiday_sessions(candles: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Remove near-empty candles on `absent_ok` holidays (market effectively closed).
+
+    A candle built from a couple of bars has a meaningless range and would distort the
+    volatility estimate, so it is treated exactly like a missing session.
+    """
+    if "bars" not in candles.columns or candles["bars"].isna().all():
+        return candles, []
+    d = cfg["data"]
+    floor = d.get("holiday_min_bars", d["min_bars_per_session"])
+    drop, notes = [], []
+    for label, bars in candles["bars"].items():
+        h = holiday_for(label, cfg)
+        if h and h["absent_ok"] and bars < floor:
+            drop.append(label)
+            notes.append(
+                f"{label.date()} ({h['name']}): only {int(bars)} hourly bar(s); candle excluded "
+                f"from history (market effectively closed)."
+            )
+    if drop:
+        candles = candles.drop(index=drop)
+    return candles, notes
+
+
+def holiday_target_note(target: pd.Timestamp, cfg: dict) -> list[str]:
+    """Email note when the candle being forecast falls on a listed US holiday."""
+    h = holiday_for(target, cfg)
+    if not h:
+        return []
+    return [
+        f"US holiday session ({h['name']}): liquidity is usually thin and gaps are more likely; "
+        f"treat today's range with extra caution."
+    ]
+
+
+# --------------------------------------------------------------------------
 # Download (network) - isolated so tests can replace it
 # --------------------------------------------------------------------------
 def _download(symbol: str, interval: str, days: int) -> pd.DataFrame:
@@ -213,16 +276,44 @@ def validate_candles(
 
     last_label = candles.index[-1]
     if last_label != expected_last:
-        raise DataError(
-            f"Stale data: newest complete candle is {last_label.date()}, "
-            f"expected {expected_last.date()}."
-        )
+        # An `absent_ok` holiday session may legitimately be missing: accept candles that end on
+        # the previous weekday, but only for the holidays listed in config (never for plain gaps).
+        cand, accepted = expected_last, False
+        while cand > last_label:
+            h = holiday_for(cand, cfg)
+            if not (h and h["absent_ok"]):
+                break
+            cand = _previous_weekday(cand)
+            if cand == last_label:
+                accepted = True
+                warnings.append(
+                    f"No candle for {expected_last.date()} ({h['name']}): market effectively closed; "
+                    f"history ends on {last_label.date()}."
+                )
+                break
+        if not accepted:
+            raise DataError(
+                f"Stale data: newest complete candle is {last_label.date()}, "
+                f"expected {expected_last.date()}."
+            )
 
-    if check_bars and candles["bars"].iloc[-1] < d["min_bars_per_session"]:
-        raise DataError(
-            f"Newest complete candle has only {int(candles['bars'].iloc[-1])} hourly bars "
-            f"(need >= {d['min_bars_per_session']})."
-        )
+    if check_bars:
+        bars = int(candles["bars"].iloc[-1])
+        need = d["min_bars_per_session"]
+        if bars < need:
+            h = holiday_for(last_label, cfg)
+            floor = min(need, d.get("holiday_min_bars", need))
+            if h and bars >= floor:
+                warnings.append(
+                    f"Thin liquidity on {last_label.date()} ({h['name']}): {bars} hourly bars "
+                    f"(normal >= {need}); accepted as a US-holiday session."
+                )
+            else:
+                extra = f"; holiday floor {floor} for {h['name']}" if h else ""
+                raise DataError(
+                    f"Newest complete candle has only {bars} hourly bars "
+                    f"(need >= {need}{extra})."
+                )
 
     rets = candles["Close"].pct_change().abs().dropna()
     big = rets[rets > d["max_abs_daily_return"]]
@@ -364,10 +455,12 @@ def _bundle_from_hourly(
 
     candles_all = build_ny_close_candles(hourly, tz, hour, now_utc)
     complete = candles_all[candles_all["complete"]]
+    complete, holiday_notes = drop_empty_holiday_sessions(complete, cfg)
     expected = last_complete_label(now_utc, tz, hour)
-    warnings = validate_candles(complete, cfg, expected_last=expected, check_bars=True)
+    warnings = holiday_notes + validate_candles(complete, cfg, expected_last=expected, check_bars=True)
 
     target = target_label(now_utc, tz, hour)
+    warnings += holiday_target_note(target, cfg)
     if target in candles_all.index and not candles_all.loc[target, "complete"]:
         cur = candles_all.loc[target]
         reference_price = float(hourly["Close"].iloc[-1])
@@ -377,7 +470,9 @@ def _bundle_from_hourly(
         # Legitimate only while the market is closed (Fri 17:00 NY -> Sun 17:00 NY) or on
         # Sunday evening before the feed publishes its first bar of the new week.
         if not _weekend_window(now_utc, tz):
-            raise DataError(f"No hourly bars yet for the target session {target.date()}.")
+            h = holiday_for(target, cfg)
+            why = f" ({h['name']}: the market may be closed today)" if h else ""
+            raise DataError(f"No hourly bars yet for the target session {target.date()}{why}.")
         last = complete.iloc[-1]
         reference_price = float(last["Close"])
         reference_time = last["last_ts"]
@@ -428,6 +523,7 @@ def _bundle_from_daily(symbol: str, is_futures: bool, cfg: dict, now_utc: pd.Tim
     complete = df[df.index <= expected].copy()
     complete["bars"] = np.nan
     warnings = validate_candles(complete, cfg, expected_last=expected, check_bars=False)
+    warnings += holiday_target_note(target_label(now_utc, tz, hour), cfg)
     warnings.append(
         "Daily fallback: Yahoo daily bars do not end exactly at 17:00 New York; "
         "levels may differ from your MT5 candle."

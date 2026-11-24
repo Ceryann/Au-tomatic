@@ -21,6 +21,17 @@ data:
   max_stale_hours: 4             # newest hourly bar must be this fresh
   max_abs_daily_return: 0.08     # |close/close-1| above this = warning
   max_missing_weekdays: 15       # holidays tolerated before warning
+  # --- US-holiday-aware validation (Task A1). PROVISIONAL until tools/probe_holidays.py has
+  # been run on real Twelve Data history. Keys are session labels = the New York date on which
+  # the D1 candle CLOSES (17:00 NY). Quote the dates so YAML keeps them as text.
+  holiday_min_bars: 6            # hourly bars needed on a listed holiday session (normal: min_bars_per_session)
+  holidays:
+    "2026-11-26": {name: "Thanksgiving (US)"}
+    "2026-12-24": {name: "Christmas Eve (US, early close)"}
+    "2026-12-25": {name: "Christmas Day", absent_ok: true}    # absent_ok: session may be missing/near-empty
+    "2026-12-31": {name: "New Year's Eve"}
+    "2027-01-01": {name: "New Year's Day", absent_ok: true}
+    "2027-03-26": {name: "Good Friday", absent_ok: true}
   retries: 4
   backoff_seconds: 5             # exponential: 5, 10, 20, ...
 
@@ -102,3 +113,6 @@ email:
   smtp_port: 465
   display_tz: "Asia/Jakarta"     # WIB, for times shown in the email
   hide_recipients: true          # recipients cannot see each other (Bcc-style)
+  retries: 3                     # SMTP attempts on transient errors (disconnects, timeouts)
+  retry_delay_s: 5               # pause before retry n is retry_delay_s * 3^(n-1)
+  fallback_starttls_587: true    # after SSL/465 fails, try STARTTLS on port 587

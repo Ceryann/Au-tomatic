@@ -109,6 +109,7 @@ python main.py --dry-run --explain               # out\preview.html dan out\repo
 | `python tools/compare_mt5.py XAUUSD_D1.csv` | bandingkan dengan ekspor D1 dari MT5 Anda |
 | `python tools/probe_news.py` | cek feed kalender dan berita mana yang hidup di komputer Anda |
 | `python tools/probe_twelvedata.py`, `probe_symbols.py` | uji sumber data |
+| `python tools/probe_holidays.py` | hitung jumlah bar per jam pada sesi hari libur AS di riwayat Twelve Data (hanya angka bar, tanpa harga) |
 
 Ekspor MT5: *View → Symbols → tab Bars* → simbol emas, D1, 60+ hari → *Export Bars*.
 
@@ -147,6 +148,7 @@ tools/                      # backtest, event_study, probe, compare_mt5
 - Model terkalibrasi pada data sintetis dan cukup baik pada 120 sesi emas asli, tetapi sampelnya kecil. Pantau akurasi live di ledger.
 - Pengaruh event dikalibrasi dari hari FOMC yang hanya sekitar 20 sampai 23 hari, jadi selang kepercayaannya lebar. `event_extra_var` bawaan (0,5) adalah prior yang wajar, bukan hasil pasti.
 - Feed berita dan kalender gratis bisa berubah atau mati. Feed yang gagal dilewati dan email menyebutkannya.
+- Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini **sementara** sampai `probe_holidays.py` dijalankan di data asli; hari tipis yang tidak terdaftar tetap ditolak.
 - Sentimen berita memakai kamus heuristik yang tidak bisa divalidasi (tidak ada arsip berita historis), sehingga hanya ditampilkan.
 
 ## Roadmap
