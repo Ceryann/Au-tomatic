@@ -1,0 +1,2 @@
+session,created_utc,source,quality,open_known,c15,c50,c85,h15,h50,h85,l15,l50,l85,p_up,bias,regime,sigma_d,settled,close_hit,high_hit,low_hit,up_actual,event
+2026-11-24,2026-11-24T15:01Z,spot,nyclose_1h,1,-0.014078,-0.003323,0.007130,0.012520,0.012520,0.012520,-0.017774,-0.009955,-0.007714,0.367000,Bearish,Shock,0.020700,0,,,,,0
