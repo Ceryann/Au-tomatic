@@ -13,7 +13,9 @@ Usage
 
 Environment variables (GitHub Secrets in CI):
     TWELVEDATA_API_KEY                         (spot XAU/USD; without it the futures fallback is used)
-    GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_TO   (EMAIL_TO may be comma-separated)
+    EMAIL_TO                                   (may be comma-separated; the log shows only counts)
+    GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN   (Gmail API, used in CI)
+    GMAIL_USER, GMAIL_APP_PASSWORD             (optional SMTP fallback for local tests only)
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from src.email_dispatcher import (
     gmail_api_missing,
     send_email,
     send_email_gmail_api,
+    summarize_recipients,
 )
 from src.ledger import live_accuracy, load_ledger, save_ledger, settle, upsert_forecast
 from src.news_sentinel import build_news_report
@@ -47,6 +50,21 @@ from src.quant_engine import forecast_day
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("au-tomatic")
+
+
+def log_recipient_summary(raw: str | None) -> int:
+    """Log how many EMAIL_TO entries are usable, never the addresses (the repo and its logs are public).
+
+    A secret that is missing in Actions reaches the run as an empty string, so a dry run reports
+    "0 usable" and the problem shows up before any email is sent."""
+    usable, invalid, duplicates = summarize_recipients(raw)
+    log.info("EMAIL_TO: %d usable recipient(s).", usable)
+    if usable == 0:
+        log.warning("EMAIL_TO has no usable address: the secret is empty, missing or malformed.")
+    if invalid or duplicates:
+        log.warning("EMAIL_TO: ignored %d malformed entr%s and %d duplicate(s). Check the secret.",
+                    invalid, "y" if invalid == 1 else "ies", duplicates)
+    return usable
 
 
 def load_config(path: Path) -> dict:
@@ -148,6 +166,8 @@ def main(argv=None) -> int:
         in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
         log.info("Dry run: wrote %s and preview.txt.%s", out / "preview.html",
                  "" if in_ci else f" Subject: {subject}")      # subject contains price levels
+        if os.environ.get("EMAIL_TO") is not None:
+            log_recipient_summary(os.environ["EMAIL_TO"])
     else:
         user = os.environ.get("GMAIL_USER")
         password = os.environ.get("GMAIL_APP_PASSWORD")
@@ -158,6 +178,7 @@ def main(argv=None) -> int:
                       "(Gmail API; local SMTP tests may use GMAIL_USER + GMAIL_APP_PASSWORD instead).")
             return 2
         ecfg = cfg["email"]
+        log_recipient_summary(to)
         if api_creds:
             log.info("Email transport: Gmail API (HTTPS).")
         else:
