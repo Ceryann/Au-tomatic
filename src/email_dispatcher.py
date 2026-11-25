@@ -333,16 +333,38 @@ def build_market_closed_email(label: pd.Timestamp, holiday_name: str, cfg: dict)
     return subject, body, plain
 
 
-def parse_recipients(raw: str) -> list[str]:
-    """Split EMAIL_TO on commas, semicolons or whitespace; drop blanks, junk and duplicates."""
+def _scan_recipients(raw: str | None) -> tuple[list[str], int, int]:
+    """Split EMAIL_TO on commas, semicolons or whitespace.
+
+    Returns (usable addresses, number of malformed entries, number of duplicates). Empty pieces
+    left by a trailing separator are not counted as malformed."""
     seen: set[str] = set()
     out: list[str] = []
+    invalid = duplicates = 0
     for part in re.split(r"[,;\s]+", (raw or "").strip()):
         addr = part.strip().strip("<>")
-        if addr and "@" in addr and "." in addr.split("@")[-1] and addr.lower() not in seen:
+        if not addr:
+            continue
+        if "@" not in addr or "." not in addr.split("@")[-1]:
+            invalid += 1
+        elif addr.lower() in seen:
+            duplicates += 1
+        else:
             seen.add(addr.lower())
             out.append(addr)
-    return out
+    return out, invalid, duplicates
+
+
+def parse_recipients(raw: str) -> list[str]:
+    """Split EMAIL_TO on commas, semicolons or whitespace; drop blanks, junk and duplicates."""
+    return _scan_recipients(raw)[0]
+
+
+def summarize_recipients(raw: str | None) -> tuple[int, int, int]:
+    """(usable, malformed, duplicate) counts for EMAIL_TO. Counts only: the addresses themselves
+    must never reach a log because the repository is public."""
+    usable, invalid, duplicates = _scan_recipients(raw)
+    return len(usable), invalid, duplicates
 
 
 def send_email(
