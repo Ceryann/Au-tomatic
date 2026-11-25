@@ -912,6 +912,131 @@ def test_holiday_config_is_sane():
         assert ts.weekday() < 5, f"{key} is a weekend: sessions are only labelled on weekdays"
 
 
+def test_summarize_recipients_counts_without_exposing_addresses():
+    from src.email_dispatcher import parse_recipients, summarize_recipients
+
+    assert summarize_recipients("a@gmail.com, b@gmail.com") == (2, 0, 0)
+    assert summarize_recipients("a@gmail.com;b@gmail.com,") == (2, 0, 0)     # trailing separator is not "malformed"
+    assert summarize_recipients("a@gmail.com A@GMAIL.com junk @ x@y") == (1, 3, 1)
+    assert summarize_recipients("") == (0, 0, 0) and summarize_recipients(None) == (0, 0, 0)
+    for raw in ["a@gmail.com, b@gmail.com", "a@x.org a@X.org nope", " <c@x.org>;; d@y", ""]:
+        assert summarize_recipients(raw)[0] == len(parse_recipients(raw)), raw   # same rules the sender uses
+
+
+def _main_logs(argv, env, send_stub=None):
+    """Run main.main() with a failing data bundle (no network), capturing the 'au-tomatic' log messages."""
+    import logging
+    import os
+    import main as main_mod
+
+    messages: list[str] = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    lg = logging.getLogger("au-tomatic")
+    handler, old_level = H(), lg.level
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    saved_env = {k: os.environ.get(k) for k in env}
+    orig_bundle, orig_send = main_mod.get_gold_bundle, main_mod.send_email_gmail_api
+
+    def boom(cfg, now_utc=None):
+        raise DataError("All data sources failed. x")
+
+    main_mod.get_gold_bundle = boom
+    if send_stub is not None:
+        main_mod.send_email_gmail_api = send_stub
+    try:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        rc = main_mod.main(argv)
+    finally:
+        main_mod.get_gold_bundle, main_mod.send_email_gmail_api = orig_bundle, orig_send
+        lg.removeHandler(handler)
+        lg.setLevel(old_level)
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return rc, messages
+
+
+def test_dry_run_logs_recipient_counts_but_never_the_addresses():
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="au_rcpt_")
+    base = ["--dry-run", "--out", tmp, "--no-ledger", "--no-macro", "--no-news"]
+    raw = "zulu.one@kantor.test, zulu.two@kantor.test; ZULU.ONE@kantor.test junk x@y"
+    _, logs = _main_logs(base, {"EMAIL_TO": raw})
+    text = "\n".join(logs)
+    assert "EMAIL_TO: 2 usable recipient(s)." in text, text
+    assert "ignored 2 malformed entries and 1 duplicate(s)" in text, text
+    assert "zulu" not in text.lower() and "kantor" not in text.lower(), "an address leaked into the log"
+
+    # a secret missing in Actions arrives as an empty string: say so before any real send
+    _, logs = _main_logs(base, {"EMAIL_TO": ""})
+    text = "\n".join(logs)
+    assert "EMAIL_TO: 0 usable recipient(s)." in text and "no usable address" in text, text
+
+    # a local dry run without EMAIL_TO stays quiet
+    _, logs = _main_logs(base, {"EMAIL_TO": None})
+    assert not any("EMAIL_TO" in m for m in logs), logs
+
+
+def test_real_send_logs_recipient_count_before_sending():
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="au_send_")
+    env = {"EMAIL_TO": "zulu.one@kantor.test, zulu.two@kantor.test",
+           "GMAIL_OAUTH_CLIENT_ID": "x", "GMAIL_OAUTH_CLIENT_SECRET": "y", "GMAIL_OAUTH_REFRESH_TOKEN": "z",
+           "GMAIL_USER": None, "GMAIL_APP_PASSWORD": None}
+    sent: list[int] = []
+
+    def stub(*args, **kwargs):                      # no network: pretend both recipients were accepted
+        sent.append(1)
+        return 2, 0
+
+    rc, logs = _main_logs(["--out", tmp, "--no-ledger", "--no-macro", "--no-news"], env, send_stub=stub)
+    text = "\n".join(logs)
+    assert sent == [1], "the stub was not used, so the real-send branch did not run"
+    assert "EMAIL_TO: 2 usable recipient(s)." in text and "Email sent to 2 recipient(s)." in text, text
+    assert text.index("EMAIL_TO: 2 usable") < text.index("Email sent to 2"), "count must be logged before sending"
+    assert "zulu" not in text.lower() and "kantor" not in text.lower(), "an address leaked into the log"
+
+
+def test_readme_secrets_table_matches_workflow():
+    """Regression: README kept listing GMAIL_USER / GMAIL_APP_PASSWORD as required secrets after the
+    workflow moved to Gmail API OAuth. The secrets table in the README and the secrets the workflows
+    actually read must stay identical."""
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    used: set[str] = set()
+    for wf in (root / ".github" / "workflows").glob("*.yml"):
+        used |= set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", wf.read_text(encoding="utf-8")))
+    used.discard("GITHUB_TOKEN")                      # provided by Actions, never set by hand
+
+    documented: set[str] = set()
+    in_table = False
+    for line in (root / "README.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("| Secret"):
+            in_table = True                           # header row of the secrets table
+            continue
+        if in_table:
+            if not line.startswith("|"):
+                break
+            first_cell = line.split("|")[1]
+            documented |= set(re.findall(r"`([A-Z][A-Z0-9_]*)`", first_cell))
+
+    assert used, "no secrets found in the workflows: the test would pass vacuously"
+    assert used <= documented, f"used by a workflow but missing in README: {sorted(used - documented)}"
+    assert documented <= used, f"listed in README but unused by any workflow: {sorted(documented - used)}"
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
