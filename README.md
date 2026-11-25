@@ -71,17 +71,10 @@ Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Lo
 
 ### 1. Siapkan akun dan kunci
 - **Twelve Data:** daftar gratis di twelvedata.com, ambil API key. Paket gratis memadai (± 4 sampai 5 credits per hari dari 800).
-- **Gmail:** aktifkan verifikasi 2 langkah, lalu buat *Sandi aplikasi* (16 karakter).
+- **Gmail:** buat OAuth client bertipe Desktop di Google Cloud, lalu jalankan `python tools/gmail_oauth_setup.py` sekali di komputer Anda untuk mendapat refresh token (izin kirim saja). Rinciannya ada di bagian *Pengiriman email dan secret* di bawah. Sandi aplikasi tidak dipakai workflow.
 
 ### 2. GitHub Secrets
-Repo → *Settings → Secrets and variables → Actions → New repository secret*:
-
-| Nama | Isi |
-|---|---|
-| `TWELVEDATA_API_KEY` | API key Twelve Data |
-| `GMAIL_USER` | Gmail pengirim |
-| `GMAIL_APP_PASSWORD` | sandi aplikasi (tanpa spasi) |
-| `EMAIL_TO` | penerima, boleh beberapa dipisah koma (saling tersembunyi) |
+Repo → *Settings → Secrets and variables → Actions → New repository secret*. Daftar lengkap lima secret yang dibutuhkan ada di tabel pada bagian *Pengiriman email dan secret* di bawah. `EMAIL_TO` boleh berisi beberapa alamat dipisah koma (saling tersembunyi).
 
 ### 3. Jalankan
 *Actions → Au-tomatic Daily → Run workflow*. Pertama dengan **dry_run dicentang** (memeriksa seluruh jalur tanpa mengirim email dan tanpa mencetak level harga), lalu tanpa centang untuk mengirim email sungguhan. Jadwal otomatis: **Minggu sampai Kamis 22:30 UTC** (Senin sampai Jumat 05:30 WIB).
@@ -137,6 +130,8 @@ Gmail menutup login SMTP dari server GitHub (dibuktikan dengan `tools/probe_smtp
 | `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET` | OAuth client bertipe Desktop |
 | `GMAIL_OAUTH_REFRESH_TOKEN` | keluaran `tools/gmail_oauth_setup.py` |
 | `EMAIL_TO` | satu atau lebih alamat tujuan, dipisah koma |
+
+Setiap run mencatat `EMAIL_TO: N usable recipient(s).` di log (hanya jumlah, tidak pernah alamatnya), ditambah peringatan bila ada entri yang rusak atau ganda. Pada *dry run* baris ini muncul tanpa mengirim email, sehingga secret `EMAIL_TO` yang kosong atau salah ketahuan sebelum pengiriman sungguhan. Pastikan N sama dengan jumlah penerima yang Anda maksud.
 
 SMTP (`GMAIL_USER` + `GMAIL_APP_PASSWORD`) tetap didukung kode untuk uji dari komputer sendiri, tetapi tidak dipakai workflow.
 
