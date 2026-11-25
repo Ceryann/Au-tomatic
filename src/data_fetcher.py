@@ -36,6 +36,19 @@ class DataError(RuntimeError):
     """Raised when data is missing, stale, or structurally invalid."""
 
 
+class MarketClosedError(DataError):
+    """No usable data AND the target session is a listed market-closed holiday (`absent_ok`).
+
+    Subclasses DataError so any caller that does not know about it still treats it as a failure.
+    `main.py` catches it first and sends the short "market closed" email instead of an error email.
+    """
+
+    def __init__(self, label: pd.Timestamp, holiday_name: str, reasons: list[str]):
+        self.label, self.holiday_name, self.reasons = label, holiday_name, list(reasons)
+        super().__init__(f"Market closed for {label.date()} ({holiday_name}); no usable data. "
+                         + " | ".join(self.reasons))
+
+
 @dataclass
 class DataBundle:
     """Everything downstream stages need from the data layer."""
@@ -587,6 +600,10 @@ def get_gold_bundle(cfg: dict, now_utc: Optional[pd.Timestamp] = None) -> DataBu
         bundle.warnings = failures + bundle.warnings
         return bundle
 
+    target = target_label(now, cfg["market"]["candle_cutoff_tz"], cfg["market"]["candle_cutoff_hour"])
+    h = holiday_for(target, cfg)
+    if h and h["absent_ok"]:       # a listed closed-market day with no data is expected, not a fault
+        raise MarketClosedError(target, h["name"], failures)
     raise DataError("All data sources failed. " + " | ".join(failures))
 
 

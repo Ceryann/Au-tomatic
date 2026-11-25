@@ -28,11 +28,12 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from src.data_fetcher import DataError, fetch_macro_daily, get_gold_bundle
+from src.data_fetcher import DataError, MarketClosedError, fetch_macro_daily, get_gold_bundle
 from src.email_dispatcher import (
     build_data_check_email,
     build_error_email,
     build_forecast_email,
+    build_market_closed_email,
     EmailAuthError,
     EmailTransportError,
     gmail_api_credentials,
@@ -126,6 +127,10 @@ def main(argv=None) -> int:
                 except Exception as exc:  # noqa: BLE001
                     hint = " Run: python -m pip install -r requirements.txt" if isinstance(exc, ImportError) else ""
                     log.warning("Computation report skipped (%s: %s).%s", type(exc).__name__, exc, hint)
+    except MarketClosedError as exc:      # listed closed-market holiday: short notice, not an error
+        log.warning("Market closed (%s) on %s; sending the short holiday email. Data problems seen: %s",
+                    exc.holiday_name, exc.label.date(), " | ".join(exc.reasons) or "none")
+        subject, html_body, text_body = build_market_closed_email(exc.label, exc.holiday_name, cfg)
     except DataError as exc:
         failed = True
         log.error("Pipeline failed: %s", exc)
@@ -149,8 +154,8 @@ def main(argv=None) -> int:
         to = os.environ.get("EMAIL_TO")
         api_creds = gmail_api_credentials(os.environ)     # Gmail API (HTTPS) is preferred when configured
         if not to or not (api_creds or (user and password)):
-            log.error("Missing EMAIL_TO and either the GMAIL_OAUTH_* secrets (Gmail API) "
-                      "or GMAIL_USER + GMAIL_APP_PASSWORD (SMTP).")
+            log.error("Cannot send email: need EMAIL_TO plus the three GMAIL_OAUTH_* secrets "
+                      "(Gmail API; local SMTP tests may use GMAIL_USER + GMAIL_APP_PASSWORD instead).")
             return 2
         ecfg = cfg["email"]
         if api_creds:

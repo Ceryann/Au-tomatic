@@ -305,6 +305,34 @@ def build_error_email(error_message: str, cfg: dict) -> tuple[str, str, str]:
     return subject, body, plain
 
 
+_HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+_BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def build_market_closed_email(label: pd.Timestamp, holiday_name: str, cfg: dict) -> tuple[str, str, str]:
+    """Short email for a listed market-closed holiday (instead of an error email).
+
+    Carries no price levels and no pipeline details. The holiday name comes from config.yaml.
+    """
+    date_txt = f"{_HARI[label.weekday()]}, {label.day} {_BULAN[label.month - 1]} {label.year}"
+    subject = f"{cfg['email']['subject_prefix']} Pasar libur hari ini | tidak ada perkiraan"
+    safe_name = html.escape(holiday_name)
+    rows = (
+        '<tr><td style="padding:8px 20px;font-size:14px;">'
+        f"Hari ini ({html.escape(date_txt)}) pasar emas libur: <b>{safe_name}</b>. "
+        "Tidak ada perkiraan candle D1 hari ini.</td></tr>"
+        '<tr><td style="padding:4px 20px 8px 20px;font-size:13px;color:#374151;">'
+        "Perkiraan berikutnya dikirim pada hari kerja berikutnya.</td></tr>"
+    )
+    body = _wrap_html("Pasar libur", rows, DISCLAIMER)
+    plain = (
+        f"AU-TOMATIC - pasar libur hari ini ({date_txt}): {holiday_name}.\n"
+        "Tidak ada perkiraan candle D1 hari ini. Perkiraan berikutnya dikirim pada hari kerja berikutnya.\n\n"
+        f"{DISCLAIMER}"
+    )
+    return subject, body, plain
+
+
 def parse_recipients(raw: str) -> list[str]:
     """Split EMAIL_TO on commas, semicolons or whitespace; drop blanks, junk and duplicates."""
     seen: set[str] = set()

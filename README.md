@@ -1,12 +1,20 @@
 # Au-tomatic
 
-[![CI](https://github.com/USERNAME/au-tomatic/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/au-tomatic/actions/workflows/ci.yml)
+[![CI](https://github.com/Ceryann/Au-tomatic/actions/workflows/ci.yml/badge.svg)](https://github.com/Ceryann/Au-tomatic/actions/workflows/ci.yml)
 
 *Au = Aurum (emas). Notifikasi pagi kisaran candle D1 XAUUSD.*
 
 **English abstract.** Au-tomatic is a daily Python bot that emails a probabilistic forecast of today's XAUUSD D1 candle (Close, High, Low as 70% prediction intervals). It builds 17:00-New-York candles from hourly spot data, estimates a trend with a Kalman filter and market regimes with a Hidden Markov Model, and simulates 10,000 intraday Merton jump-diffusion paths with release-hour jumps on high-impact USD event days. It is evaluated by walk-forward backtests and a live public ledger. It makes **no claim of directional skill**: the backtest shows gold's daily direction is not predictable from the trend, and the project reports that negative result openly.
 
 > Estimasi statistik, bukan nasihat finansial. Bukan sinyal entry, SL, atau TP.
+
+## Contoh keluaran (data sintetis)
+
+Gambar di bawah dibuat dari random walk, **bukan harga pasar** (lihat banner pada gambar). Dibuat ulang dengan `python tools/make_samples.py`. Penjelasan lengkap metode ada di [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+
+| Email pagi | Laporan perhitungan (`--explain`) |
+|---|---|
+| ![Contoh email sintetis](docs/img/email_sample.png) | ![Contoh laporan sintetis](docs/img/report_sample.png) |
 
 ## Apa yang dihasilkan
 
@@ -119,9 +127,18 @@ Ekspor MT5: *View → Symbols → tab Bars* → simbol emas, D1, 60+ hari → *E
 
 Setiap run sungguhan menambah satu baris ke `data/predictions_log.csv`, dan workflow meng-commit-nya. Esok harinya baris itu "diselesaikan": apakah close, high, dan low jatuh di dalam kisaran. Isi ledger aman untuk repo Public: hanya selisih relatif (pecahan), probabilitas, rezim, dan penanda 0/1. **Tidak ada harga mentah.** Commit harian juga menjaga jadwal tetap aktif (GitHub mematikan jadwal di repo Public setelah 60 hari tanpa aktivitas).
 
-## Pengiriman email
+## Pengiriman email dan secret
 
-Gmail menutup login SMTP dari server GitHub (dibuktikan dengan `tools/probe_smtp.py`: akun uji palsu pun diputus), jadi jalur utama adalah **Gmail API lewat HTTPS** dengan izin `gmail.send` saja. Secret: `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`, dan `EMAIL_TO`. Layar persetujuan OAuth harus berstatus **In production**; pada status Testing refresh token mati tiap 7 hari. Bila ketiga secret OAuth tidak ada, bot memakai SMTP (`GMAIL_USER` + `GMAIL_APP_PASSWORD`), berguna untuk uji dari komputer sendiri.
+Gmail menutup login SMTP dari server GitHub (dibuktikan dengan `tools/probe_smtp.py`: akun uji palsu pun diputus), jadi jalur utama adalah **Gmail API lewat HTTPS** dengan izin `gmail.send` saja. Layar persetujuan OAuth harus berstatus **In production**; pada status Testing refresh token mati tiap 7 hari. Token dibuat sekali dengan `tools/gmail_oauth_setup.py`.
+
+| Secret (Settings > Secrets and variables > Actions) | Isi |
+|---|---|
+| `TWELVEDATA_API_KEY` | kunci API Twelve Data |
+| `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET` | OAuth client bertipe Desktop |
+| `GMAIL_OAUTH_REFRESH_TOKEN` | keluaran `tools/gmail_oauth_setup.py` |
+| `EMAIL_TO` | satu atau lebih alamat tujuan, dipisah koma |
+
+SMTP (`GMAIL_USER` + `GMAIL_APP_PASSWORD`) tetap didukung kode untuk uji dari komputer sendiri, tetapi tidak dipakai workflow.
 
 ## Struktur
 
@@ -136,9 +153,10 @@ src/news_sentinel.py        # kalender, RSS, kamus sentimen emas
 src/ledger.py               # ledger prediksi + akurasi live
 src/evaluation.py           # walk-forward dan event study
 src/report.py               # laporan komputasi (angka + grafik)
-src/email_dispatcher.py     # email HTML + teks, Gmail SMTP
-tests/                      # 79 tes offline (tanpa jaringan)
-tools/                      # backtest, event_study, probe, compare_mt5
+src/email_dispatcher.py     # email HTML + teks, Gmail API (HTTPS), SMTP cadangan
+tests/                      # 102 tes offline (tanpa jaringan)
+tools/                      # backtest, event_study, probe, compare_mt5, make_samples
+docs/                       # METHODOLOGY.md, contoh sintetis (samples/, img/)
 .github/workflows/          # daily_xauusd.yml (jadwal), ci.yml (tes)
 ```
 
@@ -154,13 +172,14 @@ tools/                      # backtest, event_study, probe, compare_mt5
 - Model terkalibrasi pada data sintetis dan cukup baik pada 120 sesi emas asli, tetapi sampelnya kecil. Pantau akurasi live di ledger.
 - Pengaruh event dikalibrasi dari hari FOMC yang hanya sekitar 20 sampai 23 hari, jadi selang kepercayaannya lebar. `event_extra_var` bawaan (0,5) adalah prior yang wajar, bukan hasil pasti.
 - Feed berita dan kalender gratis bisa berubah atau mati. Feed yang gagal dilewati dan email menyebutkannya.
-- Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini **sementara** sampai `probe_holidays.py` dijalankan di data asli; hari tipis yang tidak terdaftar tetap ditolak.
+- Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini **sementara** sampai `probe_holidays.py` dijalankan di data asli; hari tipis yang tidak terdaftar tetap ditolak. Jika sesi target adalah hari libur `absent_ok` (mis. 25 Des, 1 Jan, Jumat Agung) **dan** semua sumber data gagal, bot mengirim email singkat "Pasar libur hari ini" (tanpa angka, run hijau) dan alasan teknisnya hanya dicatat di log; di hari lain kegagalan data tetap menjadi email error.
 - Sentimen berita memakai kamus heuristik yang tidak bisa divalidasi (tidak ada arsip berita historis), sehingga hanya ditampilkan.
 
 ## Roadmap
 
-1. Selesai: data, validasi, email, model, ledger, radar berita dan kalender.
-2. Opsional: Ridge atau LightGBM dengan fitur makro (DXY, US10Y, suku bunga riil), hanya jika mengalahkan baseline di backtest.
+1. Selesai: data, validasi, email (Gmail API), model, ledger, radar berita dan kalender, validasi sadar hari libur AS (sementara).
+2. Berikutnya: verifikasi fitur makro di data asli, ringkasan akurasi live per rezim dan hari event.
+3. Opsional: Ridge atau LightGBM dengan fitur makro (DXY, US10Y, suku bunga riil), hanya jika lolos aturan penerimaan yang ditetapkan sebelum melihat hasil (pinball Close membaik minimal 1% dengan selang bootstrap 95% tidak memuat 0, cakupan tetap 60 sampai 80%, lolos uji kebocoran).
 
 ## Lisensi
 

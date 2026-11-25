@@ -24,6 +24,7 @@ from src import data_fetcher as df_mod  # noqa: E402
 from src import news_sentinel as ns_mod  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     DataError,
+    MarketClosedError,
     build_ny_close_candles,
     drop_empty_holiday_sessions,
     get_gold_bundle,
@@ -32,7 +33,11 @@ from src.data_fetcher import (  # noqa: E402
     target_label,
     validate_candles,
 )
-from src.email_dispatcher import build_data_check_email, build_error_email  # noqa: E402
+from src.email_dispatcher import (  # noqa: E402
+    build_data_check_email,
+    build_error_email,
+    build_market_closed_email,
+)
 
 TZ, HOUR = "America/New_York", 17
 NY = ZoneInfo(TZ)
@@ -807,6 +812,95 @@ def test_bundle_survives_missing_holiday_session_and_notes_holiday_target():
         b2 = get_gold_bundle(_hol_cfg(), now_utc=now)
     assert b2.target_session == HOL_LABEL
     assert any("US holiday session" in x for x in b2.warnings), b2.warnings
+
+
+# ------------------------------------------- Market-closed holiday email (instead of an error)
+def _no_data_cfg(absent_ok: bool) -> dict:
+    cfg = _hol_cfg(absent_ok=absent_ok, name="Christmas Day")
+    cfg["data"]["holidays"] = {"2026-01-15": {"name": "Christmas Day", "absent_ok": absent_ok}}
+    return cfg
+
+
+def test_closed_holiday_with_no_data_raises_market_closed():
+    now = utc("2026-01-14 22:30")                          # 17:30 EST: target session = 2026-01-15
+    assert target_label(now, TZ, HOUR) == HOL_LABEL
+    with FakeTD(error="no data (market closed)"):
+        try:
+            get_gold_bundle(_no_data_cfg(absent_ok=True), now_utc=now)
+            raise AssertionError("expected MarketClosedError")
+        except MarketClosedError as exc:
+            assert isinstance(exc, DataError)                # old callers still see a failure
+            assert exc.label == HOL_LABEL and exc.holiday_name == "Christmas Day"
+            assert exc.reasons, "the underlying data problems must be kept for the log"
+
+
+def test_same_failure_without_absent_ok_or_off_holiday_is_still_an_error():
+    now = utc("2026-01-14 22:30")
+    for cfg in (_no_data_cfg(absent_ok=False), load_cfg()):   # strict holiday, and an ordinary date
+        with FakeTD(error="feed down"):
+            try:
+                get_gold_bundle(cfg, now_utc=now)
+                raise AssertionError("expected DataError")
+            except MarketClosedError:
+                raise AssertionError("must not be reported as a market holiday")
+            except DataError as exc:
+                assert "All data sources failed" in str(exc)
+
+
+def test_closed_holiday_with_real_data_still_gets_a_forecast_bundle():
+    now = utc("2026-01-14 22:30")
+    with FakeTD(hourly_until(now)):
+        b = get_gold_bundle(_no_data_cfg(absent_ok=True), now_utc=now)
+    assert b.target_session == HOL_LABEL
+    assert any("US holiday session" in x for x in b.warnings)
+
+
+def test_market_closed_email_is_short_and_has_no_numbers_or_error_wording():
+    cfg = load_cfg()
+    subject, body, plain = build_market_closed_email(pd.Timestamp("2026-12-25"), "Christmas Day", cfg)
+    assert subject.startswith(cfg["email"]["subject_prefix"]) and "Pasar libur" in subject
+    assert "Jumat, 25 Des 2026" in plain and "Christmas Day" in plain
+    for text in (subject, body, plain):
+        assert "$" not in text, "no price levels in a closed-market email"
+        for bad in ("gagal", "GAGAL", "error", "Error", "TIDAK TERSEDIA"):
+            assert bad not in text, bad
+    assert len(plain) < 400
+    # a holiday name from config is escaped in the HTML part
+    _, body2, _ = build_market_closed_email(pd.Timestamp("2026-12-25"), "A <b>&</b> B", cfg)
+    assert "A &lt;b&gt;&amp;&lt;/b&gt; B" in body2
+
+
+def test_main_sends_closed_email_and_exits_zero_on_a_closed_holiday():
+    import main as main_mod
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="au_closed_"))
+    orig = main_mod.get_gold_bundle
+    def boom(cfg, now_utc=None):
+        raise MarketClosedError(pd.Timestamp("2026-12-25"), "Christmas Day", ["feed empty"])
+    main_mod.get_gold_bundle = boom
+    try:
+        rc = main_mod.main(["--dry-run", "--out", str(tmp), "--no-ledger"])
+        preview = (tmp / "preview.txt").read_text(encoding="utf-8")
+    finally:
+        main_mod.get_gold_bundle = orig
+    assert rc == 0, rc
+    assert "Pasar libur hari ini" in preview and "PIPELINE GAGAL" not in preview
+
+
+def test_main_still_reports_a_plain_data_error_as_failure():
+    import main as main_mod
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="au_error_"))
+    orig = main_mod.get_gold_bundle
+    def boom(cfg, now_utc=None):
+        raise DataError("All data sources failed. x")
+    main_mod.get_gold_bundle = boom
+    try:
+        rc = main_mod.main(["--dry-run", "--out", str(tmp), "--no-ledger"])
+        preview = (tmp / "preview.txt").read_text(encoding="utf-8")
+    finally:
+        main_mod.get_gold_bundle = orig
+    assert rc == 1 and "PIPELINE GAGAL" in preview
 
 
 def test_holiday_config_is_sane():
