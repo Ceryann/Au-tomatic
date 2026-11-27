@@ -21,9 +21,16 @@ data:
   max_stale_hours: 4             # newest hourly bar must be this fresh
   max_abs_daily_return: 0.08     # |close/close-1| above this = warning
   max_missing_weekdays: 15       # holidays tolerated before warning
-  # --- US-holiday-aware validation (Task A1). PROVISIONAL until tools/probe_holidays.py has
-  # been run on real Twelve Data history. Keys are session labels = the New York date on which
-  # the D1 candle CLOSES (17:00 NY). Quote the dates so YAML keeps them as text.
+  # --- US-holiday-aware validation (Task A1). Checked against real Twelve Data history with
+  # tools/probe_holidays.py on 2026-11-25 (726 sessions, 2024-02 to 2026-11):
+  #   * the thinnest US-holiday session that still had bars was 18 (Good Friday 2025), so
+  #     holiday_min_bars below is a deliberately lenient floor, not a measured value;
+  #   * 25 Dec, 1 Jan and Good Friday had NO bars in 2024 but 24 bars in 2025-2026, so absent_ok
+  #     only TOLERATES an empty session; it does not force a "market closed" email. If the feed
+  #     returns bars, the normal forecast is sent with the thin-liquidity note (decision of 2026-11-25).
+  # Entries dated 2027-11 and later come from calendar rules and have not been seen in the feed yet.
+  # Keys are session labels = the New York date on which the D1 candle CLOSES (17:00 NY).
+  # Quote the dates so YAML keeps them as text.
   holiday_min_bars: 6            # hourly bars needed on a listed holiday session (normal: min_bars_per_session)
   holidays:
     "2026-11-26": {name: "Thanksgiving (US)"}
@@ -32,6 +39,9 @@ data:
     "2026-12-31": {name: "New Year's Eve"}
     "2027-01-01": {name: "New Year's Day", absent_ok: true}
     "2027-03-26": {name: "Good Friday", absent_ok: true}
+    "2027-11-25": {name: "Thanksgiving (US)"}
+    "2027-12-24": {name: "Christmas Day (observed, US)", absent_ok: true}   # 25 Dec 2027 is a Saturday
+    "2027-12-31": {name: "New Year's Eve"}
   retries: 4
   backoff_seconds: 5             # exponential: 5, 10, 20, ...
 
@@ -112,6 +122,8 @@ email:
   smtp_host: "smtp.gmail.com"
   smtp_port: 465
   display_tz: "Asia/Jakarta"     # WIB, for times shown in the email
+  late_run_hours: 2.0            # run this many hours after the candle opened (GitHub can delay cron):
+                                 # the email then carries a "Run terlambat" banner
   hide_recipients: true          # recipients cannot see each other (Bcc-style)
   retries: 3                     # SMTP attempts on transient errors (disconnects, timeouts)
   retry_delay_s: 5               # pause before retry n is retry_delay_s * 3^(n-1)

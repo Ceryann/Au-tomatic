@@ -22,6 +22,7 @@ import yaml  # noqa: E402
 
 from src import data_fetcher as df_mod  # noqa: E402
 from src import news_sentinel as ns_mod  # noqa: E402
+from src.notes import INFO, WARN, Note, note_level, note_title  # noqa: E402
 from src.data_fetcher import (  # noqa: E402
     DataError,
     MarketClosedError,
@@ -271,7 +272,7 @@ def test_fallback_to_futures_is_labelled():
 
     assert b.is_futures and b.symbol == "GC=F"
     assert any("XAU/USD 1h failed" in w for w in b.warnings)
-    assert any("Futures" in w for w in b.warnings)
+    assert any("futures" in w.lower() for w in b.warnings)
     subject, html_body, text = build_data_check_email(b, cfg)
     assert "Futures" in subject and "Futures" in html_body
 
@@ -323,7 +324,7 @@ def test_daily_fallback_uses_exchange_calendar_date():
     assert b.quality == "daily_fallback"
     assert b.candles.index[-1] == pd.Timestamp("2026-01-13")   # not shifted back a day
     assert b.target_session == pd.Timestamp("2026-01-14")
-    assert any("Daily fallback" in w for w in b.warnings)
+    assert any("Data harian cadangan" in note_title(w) for w in b.warnings)
 
 
 def test_all_sources_stale_raises_instead_of_guessing():
@@ -360,7 +361,7 @@ def test_sunday_run_without_new_bar_uses_friday_close():
     assert b.candles.index[-1] == pd.Timestamp("2026-01-09")   # Friday
     assert b.session_open is None
     assert b.reference_price == b.candles["Close"].iloc[-1]
-    assert any("Weekend gap" in w for w in b.warnings)
+    assert any("Awal pekan" in note_title(w) for w in b.warnings)
 
 
 def test_sunday_run_with_new_bar_uses_monday_open():
@@ -375,7 +376,7 @@ def test_sunday_run_with_new_bar_uses_monday_open():
     assert b.target_session == pd.Timestamp("2026-01-12")
     assert b.session_open == hourly["Open"].iloc[-1]
     assert b.reference_price == hourly["Close"].iloc[-1]
-    assert not any("Weekend gap" in w for w in b.warnings)
+    assert not any("Awal pekan" in note_title(w) for w in b.warnings)
 
 
 # ------------------------------------------------------------------- email
@@ -730,7 +731,7 @@ def test_holiday_session_with_eight_bars_passes_with_warning():
     complete = _complete(hourly, HOL_NOW)
     assert int(complete["bars"].iloc[-1]) == 8
     w = validate_candles(complete, _hol_cfg(), last_complete_label(HOL_NOW, TZ, HOUR))
-    assert any("Thin liquidity" in x and "Test Holiday" in x for x in w), w
+    assert any("Likuiditas tipis" in note_title(x) and "Test Holiday" in x for x in w), w
 
 
 def test_same_thin_session_on_a_normal_date_is_still_rejected():
@@ -763,7 +764,7 @@ def test_absent_holiday_session_is_accepted_only_when_listed():
     assert complete.index[-1] == pd.Timestamp("2026-01-14")
 
     w = validate_candles(complete, _hol_cfg(absent_ok=True), expected)
-    assert any("No candle for 2026-01-15" in x for x in w), w
+    assert any("Tidak ada candle untuk 2026-01-15" in x for x in w), w
 
     for cfg in (_hol_cfg(absent_ok=False), load_cfg()):            # listed-but-strict, and unlisted
         try:
@@ -778,7 +779,7 @@ def test_near_empty_absent_ok_candle_is_dropped_from_history():
     complete = _complete(hourly, HOL_NOW)
     kept, notes = drop_empty_holiday_sessions(complete, _hol_cfg(absent_ok=True))
     assert HOL_LABEL not in kept.index and len(kept) == len(complete) - 1
-    assert notes and "excluded" in notes[0]
+    assert notes and "tidak dipakai di riwayat" in notes[0]
     kept2, notes2 = drop_empty_holiday_sessions(complete, _hol_cfg(absent_ok=False))
     assert HOL_LABEL in kept2.index and notes2 == []               # strict holidays are never dropped
 
@@ -788,7 +789,7 @@ def test_bundle_accepts_thin_holiday_and_still_rejects_it_on_a_normal_day():
     with FakeTD(hourly):
         b = get_gold_bundle(_hol_cfg(), now_utc=HOL_NOW)
     assert b.candles.index[-1] == HOL_LABEL and b.quality == "nyclose_1h"
-    assert any("Thin liquidity" in x for x in b.warnings), b.warnings
+    assert any("Likuiditas tipis" in note_title(x) for x in b.warnings), b.warnings
     with FakeTD(hourly):
         try:
             get_gold_bundle(load_cfg(), now_utc=HOL_NOW)
@@ -804,14 +805,14 @@ def test_bundle_survives_missing_holiday_session_and_notes_holiday_target():
     with FakeTD(hourly):
         b = get_gold_bundle(_hol_cfg(absent_ok=True), now_utc=HOL_NOW)
     assert b.candles.index[-1] == pd.Timestamp("2026-01-14")
-    assert any("No candle for 2026-01-15" in x for x in b.warnings), b.warnings
+    assert any("Tidak ada candle untuk 2026-01-15" in x for x in b.warnings), b.warnings
 
     # Target session is the holiday (run the evening before): the email carries a caution note.
     now = utc("2026-01-14 22:30")
     with FakeTD(hourly_until(now)):
         b2 = get_gold_bundle(_hol_cfg(), now_utc=now)
     assert b2.target_session == HOL_LABEL
-    assert any("US holiday session" in x for x in b2.warnings), b2.warnings
+    assert any("Sesi libur AS" in note_title(x) for x in b2.warnings), b2.warnings
 
 
 # ------------------------------------------- Market-closed holiday email (instead of an error)
@@ -852,7 +853,7 @@ def test_closed_holiday_with_real_data_still_gets_a_forecast_bundle():
     with FakeTD(hourly_until(now)):
         b = get_gold_bundle(_no_data_cfg(absent_ok=True), now_utc=now)
     assert b.target_session == HOL_LABEL
-    assert any("US holiday session" in x for x in b.warnings)
+    assert any("Sesi libur AS" in note_title(x) for x in b.warnings)
 
 
 def test_market_closed_email_is_short_and_has_no_numbers_or_error_wording():

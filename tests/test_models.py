@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import test_data_layer as T  # noqa: E402  (reuses synthetic data + fakes)
 from src.data_fetcher import get_gold_bundle, session_end_utc  # noqa: E402
+from src import email_dispatcher as em_mod  # noqa: E402
 from src.email_dispatcher import build_forecast_email  # noqa: E402
+from src.notes import INFO, WARN, Note, note_level, note_title  # noqa: E402
 from src.hmm import GaussianHMM  # noqa: E402
 from src.quant_engine import (  # noqa: E402
     calibrate_jumps,
@@ -198,7 +200,7 @@ def test_sunday_gap_run_is_flagged_and_forecasts_monday():
     b = bundle_at(sunday, hourly, cfg)
     fc = forecast_day(b, None, cfg)
     assert b.target_session == pd.Timestamp("2026-01-12") and not fc.open_known
-    assert any("gap" in n.lower() for n in fc.notes)
+    assert any("akhir pekan" in n for n in fc.notes)
 
 
 def test_weekend_runs_forecast_monday_over_one_full_session():
@@ -385,6 +387,172 @@ def test_futures_email_is_labelled():
     fc = forecast_day(b, None, cfg)
     subject, html_body, text = build_forecast_email(b, fc, cfg)
     assert "Futures" in subject and "bukan spot" in html_body
+
+
+def _email_at(hours_after_now: float = 0.0, seed: int = 11):
+    """Synthetic run `hours_after_now` after the usual 22:30 UTC cron time (no network)."""
+    cfg = fast_cfg()
+    now = T.NOW + pd.Timedelta(hours=hours_after_now)
+    b = bundle_at(now, T.hourly_until(now, seed=seed), cfg)
+    fc = forecast_day(b, None, cfg)
+    return b, fc, cfg, build_forecast_email(b, fc, cfg)
+
+
+def test_run_timing_matches_the_session_boundaries():
+    import dataclasses
+    b, fc, cfg, _ = _email_at(0.0)
+    t = em_mod.run_timing(b, fc, cfg)                    # NOW = 22:30 UTC = 17:30 NY, 30 min after the open
+    assert abs(t["elapsed_h"] - 0.5) < 1e-9 and abs(t["left_h"] - 23.5) < 1e-9 and not t["late"], t
+    assert abs(t["rem_frac"] - fc.remaining_var_frac) < 1e-12
+    for hours, late in ((1.0, False), (1.49, False), (1.5, True), (7.0, True)):   # default threshold: 2 h after the open
+        t = em_mod.run_timing(dataclasses.replace(b, now_utc=b.now_utc + pd.Timedelta(hours=hours)), fc, cfg)
+        assert t["late"] is late, (hours, t)
+        assert abs(t["elapsed_h"] - (0.5 + hours)) < 1e-9
+    cfg2 = dict(cfg, email=dict(cfg["email"], late_run_hours=10))
+    t = em_mod.run_timing(dataclasses.replace(b, now_utc=b.now_utc + pd.Timedelta(hours=7)), fc, cfg2)
+    assert t["late"] is False, "late_run_hours from config.yaml must be honoured"
+    assert em_mod.run_timing(b, fc, {"email": {}}) is None, "missing config keys must degrade to None, not raise"
+
+
+def test_monday_candle_run_on_sunday_evening_counts_from_the_sunday_open():
+    cfg = fast_cfg()
+    sunday = T.utc("2026-01-11 22:30")
+    hourly = T.hourly_until(sunday, seed=11)
+    hourly = hourly[hourly.index < T.utc("2026-01-11 22:00")]
+    b = bundle_at(sunday, hourly, cfg)
+    fc = forecast_day(b, None, cfg)
+    t = em_mod.run_timing(b, fc, cfg)
+    assert abs(t["elapsed_h"] - 0.5) < 1e-9 and not t["late"], t        # Sunday 17:00 NY is the open, not Friday
+
+
+def test_email_shows_the_late_run_banner_only_when_the_run_is_late():
+    b0, fc0, cfg0, (s0, h0, t0) = _email_at(0.0)
+    assert "Run terlambat" not in h0 and "Run terlambat" not in t0
+    b7, fc7, cfg7, (s7, h7, t7) = _email_at(7.0)
+    assert "Run terlambat" in h7 and "Run terlambat" in t7
+    assert "7 jam 30 menit setelah candle dibuka" in h7 and "7 jam 30 menit setelah candle dibuka" in t7
+    assert "bukan kisaran pagi" in h7
+    assert "Run terlambat" not in s7, "the banner belongs in the body, not in the subject"
+    cfg_strict = dict(cfg7, email=dict(cfg7["email"], late_run_hours=12))
+    _, h_cfg, _ = build_forecast_email(b7, fc7, cfg_strict)
+    assert "Run terlambat" not in h_cfg, "threshold comes from config.yaml"
+
+
+def test_email_basis_line_states_time_price_and_remaining_variance():
+    for hours in (0.0, 7.0):
+        b, fc, cfg, (_, html_body, text) = _email_at(hours)
+        price = f"${b.reference_price:,.2f}"
+        pct = f"{fc.remaining_var_frac:.0%}"
+        for blob in (html_body, text):
+            assert f"harga terakhir {price}" in blob, (hours, price)
+            assert f"kira-kira {pct} variansi harian masih tersisa" in blob, (hours, pct)
+        assert "Dihitung 05:30 WIB" in text if hours == 0 else "Dihitung 12:30 WIB" in text
+
+
+def test_range_bar_marks_the_range_the_open_and_the_latest_price():
+    import re
+    html_bar = em_mod._range_bar_html(90.0, 110.0, 100.0, 95.0, open_known=True)
+    cells = re.findall(r'bgcolor="(#[0-9a-f]{6})"', html_bar)
+    assert len(cells) == 50
+    # axis 88..112 -> cell index = int((x - 88) / 24 * 50): lo 4, hi 45, open 25, latest 14
+    assert cells.count(em_mod._BAR_RANGE) == 40 and cells.count(em_mod._BAR_TRACK) == 8
+    assert cells.count(em_mod._BAR_OPEN) == 1 and cells.count(em_mod._BAR_REF) == 1
+    assert cells.index(em_mod._BAR_REF) == 14 and cells.index(em_mod._BAR_OPEN) == 25
+    assert cells[3] == em_mod._BAR_TRACK and cells[4] == em_mod._BAR_RANGE and cells[45] == em_mod._BAR_RANGE \
+        and cells[46] == em_mod._BAR_TRACK
+    assert "open $100.00" in html_bar and "harga terakhir $95.00" in html_bar
+    far = em_mod._range_bar_html(90.0, 110.0, 100.0, 50.0, open_known=True)      # price far below the range
+    assert len(re.findall(r'bgcolor="(#[0-9a-f]{6})"', far)) == 50
+    no_open = em_mod._range_bar_html(90.0, 110.0, 100.0, 95.0, open_known=False)
+    assert em_mod._BAR_OPEN not in no_open and "open $" not in no_open
+    assert em_mod._range_bar_html(100.0, 100.0, 100.0, 100.0, open_known=True) == ""   # degenerate: nothing to draw
+
+
+def test_notes_are_grouped_titled_escaped_and_plain_strings_still_work():
+    assert isinstance(Note("Judul", "isi"), str) and Note("Judul", "isi") == "isi" and "isi" in [Note("J", "isi")]
+    # regression: str.title is a built-in METHOD, so a plain string must not be mistaken for a title
+    assert note_title("plain") == "" and note_level("plain") == WARN
+    notes = [Note("Judul A", "isi <b>x</b> & lainnya", WARN), Note("Judul B", "info b", INFO),
+             "catatan polos dari radar berita", Note("Judul A", "isi <b>x</b> & lainnya", WARN)]
+    notes = em_mod._dedupe_notes(notes)
+    assert len(notes) == 3
+    out = em_mod._notes_html(notes)
+    assert out.index("Perlu diperhatikan") < out.index("Judul A") < out.index("catatan polos") < out.index(">Info<")
+    assert "<b>Judul A</b>" in out and "&lt;b&gt;x&lt;/b&gt; &amp; lainnya" in out and "<b>x</b>" not in out
+    assert out.index(">Info<") < out.index("Judul B")
+    plain = em_mod._notes_plain(notes)
+    assert plain[0] == "PERLU DIPERHATIKAN:" and "- Judul A: isi <b>x</b> & lainnya" in plain
+    assert "- catatan polos dari radar berita" in plain and "INFO:" in plain and "- Judul B: info b" in plain
+    assert em_mod._notes_html([]) == "" and em_mod._notes_plain([]) == []
+
+
+def test_forecast_email_lists_real_notes_under_the_right_group():
+    cfg = fast_cfg()
+    now = T.NOW
+    cfg["data"]["holidays"][str(pd.Timestamp("2026-01-14").date())] = {"name": "Test Holiday"}   # target session
+    b = bundle_at(now, T.hourly_until(now, seed=11), cfg)
+    fc = forecast_day(b, None, cfg)
+    _, html_body, text = build_forecast_email(b, fc, cfg)
+    assert "Sesi libur AS (Test Holiday)" in html_body and "Sesi libur AS (Test Holiday)" in text
+    assert html_body.index("Perlu diperhatikan") < html_body.index("Sesi libur AS (Test Holiday)")
+    assert "CATATAN:" not in text and "PERLU DIPERHATIKAN:" in text
+    for english in ("liquidity is usually thin", "Source is Futures", "Daily fallback"):
+        assert english not in html_body, english
+
+
+def test_headline_label_stays_and_states_what_it_is_based_on():
+    import dataclasses
+    for hours, late in ((0.0, False), (7.0, True)):
+        b, fc, cfg, _ = _email_at(hours)
+        prefix = cfg["email"]["subject_prefix"]
+        for bias, p_up in (("Bearish", 0.30), ("Bullish", 0.70), ("Netral", 0.50)):
+            subject, html_body, text = build_forecast_email(b, dataclasses.replace(fc, bias=bias, p_up=p_up), cfg)
+            shown = f"{bias} \u00b7 tengah sesi" if late else bias
+            assert f"({shown})" in html_body and f"({shown})" in text, (hours, bias)
+            if bias == "Netral":
+                assert "Netral" not in subject, "the Netral word stays out of the subject, as before"
+            else:
+                tag = " (tengah sesi)" if late else ""
+                assert subject.startswith(f"{prefix} {bias}{tag} | Close"), subject
+        delta = b.reference_price - fc.open_price
+        side = "hampir sama dengan" if abs(delta) < 0.5 else f"${abs(delta):,.2f} {'di atas' if delta > 0 else 'di bawah'}"
+        expected = f"harga terakhir ${b.reference_price:,.2f}, {side} open ${fc.open_price:,.2f}"
+        for blob in (html_body, text):
+            assert "Dasar label:" in blob and expected in blob, (hours, expected)
+            assert f"sisa variansi harian {fc.remaining_var_frac:.0%}" in blob
+            if late:
+                assert "bukan prediksi arah dari awal sesi" in blob and "Backtest: arah harian" not in blob
+            else:
+                assert "Backtest: arah harian tidak bisa ditebak" in blob and "tengah sesi" not in blob
+
+
+def test_headline_basis_before_the_candle_opens_says_so():
+    cfg = fast_cfg()
+    sunday = T.utc("2026-01-11 22:30")
+    hourly = T.hourly_until(sunday, seed=11)
+    hourly = hourly[hourly.index < T.utc("2026-01-11 22:00")]
+    b = bundle_at(sunday, hourly, cfg)
+    fc = forecast_day(b, None, cfg)
+    assert not fc.open_known
+    _, html_body, text = build_forecast_email(b, fc, cfg)
+    assert "Dasar label: candle belum dibuka" in html_body and "Dasar label: candle belum dibuka" in text
+
+
+def test_optional_blocks_never_break_the_main_email():
+    b, fc, cfg, _ = _email_at(0.0)
+    real_bar, real_timing = em_mod._range_bar_html, em_mod.run_timing
+    try:
+        def boom(*a, **k):
+            raise RuntimeError("decoration failed")
+        em_mod._range_bar_html = boom
+        _, html_body, _ = build_forecast_email(b, fc, cfg)
+        assert "Kisaran close D1 hari ini" in html_body and 'bgcolor="#f59e0b"' not in html_body
+        em_mod._range_bar_html = real_bar
+        em_mod.run_timing = lambda *a, **k: None
+        _, html_body, text = build_forecast_email(b, fc, cfg)
+        assert "Run terlambat" not in html_body and "sisa sesi" not in html_body and "Dihitung 05:30 WIB" in text
+    finally:
+        em_mod._range_bar_html, em_mod.run_timing = real_bar, real_timing
 
 
 if __name__ == "__main__":

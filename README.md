@@ -24,6 +24,11 @@ Satu email pagi (Senin sampai Jumat, 05:30 WIB) berisi:
 - Peluang candle naik, rezim pasar, dan momentum tren.
 - **Event USD hari ini** (CPI, NFP, FOMC, dan lainnya) dan berita penggerak emas, hanya jika relevan.
 - **Akurasi live** 30 hari terakhir dari ledger yang dicatat otomatis.
+- **Bar kisaran**: satu bar kecil yang menunjukkan kisaran close 70%, open, dan harga terakhir. Ini tabel HTML biasa, bukan gambar, sehingga tampil di Gmail.
+- **Dasar perhitungan**: jam run, harga terakhir, sisa waktu sesi, dan sisa variansi harian yang dipakai model.
+- **Banner "Run terlambat"** bila run dimulai lebih dari `email.late_run_hours` (bawaan 2 jam) setelah candle dibuka.
+- **Headline label** (Bullish, Bearish, atau Netral) tetap ada, disertai satu kalimat dasar: posisi harga terakhir terhadap open dan sisa variansi. Pada run terlambat label diberi penanda "tengah sesi", karena label itu hanya menerjemahkan peluang candle ditutup di atas open dari harga saat ini, bukan prediksi arah dari awal sesi.
+- **Catatan** berbahasa Indonesia, dikelompokkan menjadi "Perlu diperhatikan" dan "Info", masing-masing dengan judul dan penjelasan.
 
 Batas candle D1 = **17:00 New York**, sama dengan open candle D1 di MT5.
 
@@ -65,7 +70,7 @@ Uji walk-forward pada 120 sesi emas asli (21 November 2026, `tools/backtest.py`)
 | Direction Brier | 0,2484 (acak = 0,2500) | **tidak ada kemampuan menebak arah** |
 | Ekstrapolasi tren penuh | Brier 0,2488, 2 panggilan arah, 1 benar | tidak memperbaiki apa pun |
 
-Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Low**, bukan pada tebakan arah. Label Bullish atau Bearish hampir tidak pernah muncul, dan itu disengaja: ambang tidak diturunkan demi menghasilkan sinyal palsu. Angka di atas dapat berubah saat diuji ulang; akurasi live ada di ledger.
+Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Low**, bukan pada tebakan arah. Pada run di awal sesi (kondisi backtest) label Bullish atau Bearish hampir tidak pernah muncul, dan itu disengaja: ambang tidak diturunkan demi menghasilkan sinyal palsu. Pada run yang lebih siang label sering muncul, tetapi hanya karena harga sudah bergerak menjauhi open; uji pada data sintetis tanpa kemampuan arah menunjukkan label "benar" makin sering seiring jam run tanpa ada keahlian apa pun, jadi label run siang tidak boleh dibaca sebagai bukti kemampuan. Angka di atas dapat berubah saat diuji ulang; akurasi live ada di ledger.
 
 ## Mulai cepat
 
@@ -167,7 +172,8 @@ docs/                       # METHODOLOGY.md, contoh sintetis (samples/, img/)
 - Model terkalibrasi pada data sintetis dan cukup baik pada 120 sesi emas asli, tetapi sampelnya kecil. Pantau akurasi live di ledger.
 - Pengaruh event dikalibrasi dari hari FOMC yang hanya sekitar 20 sampai 23 hari, jadi selang kepercayaannya lebar. `event_extra_var` bawaan (0,5) adalah prior yang wajar, bukan hasil pasti.
 - Feed berita dan kalender gratis bisa berubah atau mati. Feed yang gagal dilewati dan email menyebutkannya.
-- Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini **sementara** sampai `probe_holidays.py` dijalankan di data asli; hari tipis yang tidak terdaftar tetap ditolak. Jika sesi target adalah hari libur `absent_ok` (mis. 25 Des, 1 Jan, Jumat Agung) **dan** semua sumber data gagal, bot mengirim email singkat "Pasar libur hari ini" (tanpa angka, run hijau) dan alasan teknisnya hanya dicatat di log; di hari lain kegagalan data tetap menjadi email error.
+- Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini sudah dicocokkan dengan `probe_holidays.py` pada data asli (25 Nov 2026, 726 sesi): sesi libur tertipis yang masih punya bar adalah 18, jadi `holiday_min_bars` adalah batas bawah yang longgar, bukan angka terukur. Pada 2024 feed kosong di 25 Des, 1 Jan, dan Jumat Agung, tetapi pada 2025 sampai 2026 feed punya bar penuh di tanggal-tanggal itu, sehingga `absent_ok` hanya menoleransi sesi kosong dan tidak memaksa email libur. Entri akhir 2027 dihitung dari aturan kalender dan belum terlihat di feed. Hari tipis yang tidak terdaftar tetap ditolak. Jika sesi target adalah hari libur `absent_ok` (mis. 25 Des, 1 Jan, Jumat Agung) **dan** semua sumber data gagal, bot mengirim email singkat "Pasar libur hari ini" (tanpa angka, run hijau) dan alasan teknisnya hanya dicatat di log; di hari lain kegagalan data tetap menjadi email error.
+- Waktu run memengaruhi angka. Kisaran dihitung dari harga terakhir dan sisa sesi, jadi run yang terlambat (cron GitHub pernah tertunda sekitar 6,5 jam) memberi angka yang berbeda dan lebih sempit daripada run pukul 05:30 WIB. Ledger menyimpan satu baris per sesi dan run ulang menimpanya, sehingga baris dari run terlambat tidak sebanding dengan backtest atau run tepat waktu; jam pembuatannya tercatat di `created_utc`.
 - Sentimen berita memakai kamus heuristik yang tidak bisa divalidasi (tidak ada arsip berita historis), sehingga hanya ditampilkan.
 
 ## Roadmap

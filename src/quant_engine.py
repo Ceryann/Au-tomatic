@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .data_fetcher import DataBundle, DataError, session_end_utc
+from .notes import INFO, WARN, Note
 from .signal_and_regime import build_features, fit_regime_model, kalman_filtered_path, kalman_trend
 
 log = logging.getLogger(__name__)
@@ -255,7 +256,9 @@ def forecast_day(
     if bundle.is_futures:
         r, n_roll = neutralise_roll(r)
         if n_roll:
-            notes.append(f"{n_roll} roll-like return(s) neutralised in futures history.")
+            notes.append(Note("Lompatan kontrak dinetralkan",
+                              f"{n_roll} return mirip pergantian kontrak di riwayat futures dinetralkan "
+                              f"agar tidak menggelembungkan volatilitas.", INFO))
 
     # ---- Pillar 2: regimes
     feats, used = build_features(r, macro, rv_window=10, min_coverage=m["macro"]["min_coverage"])
@@ -275,7 +278,9 @@ def forecast_day(
     sigma_raw = vcfg["w_regime"] * sigma_regime + (1 - vcfg["w_regime"]) * float(ewma[-1])
     sigma_d = float(np.clip(sigma_raw, vcfg["floor_mult"] * rv_ref, vcfg["cap_mult"] * rv_ref))
     if sigma_d != sigma_raw:
-        notes.append("Daily volatility was clipped to its sanity band.")
+        notes.append(Note("Volatilitas dibatasi",
+                          "Estimasi volatilitas harian dipotong ke batas bawah atau atas yang dianggap wajar.",
+                          INFO))
 
     # ---- Pillar 1: Kalman drift
     kal = kalman_trend(close)
@@ -290,7 +295,8 @@ def forecast_day(
     mult = 1.0
     if bundle.session_open is None:
         mult *= jcfg["sunday_mult"]
-        notes.append("Weekend-gap session: jump risk raised.")
+        notes.append(Note("Sesi pasca akhir pekan",
+                          "Risiko lompatan dinaikkan karena sesi ini mengikuti akhir pekan.", INFO))
     lam = float(min(lam0 * mult, jcfg["lambda_cap"]))
     sigma_diff = float(np.sqrt(max(sigma_d ** 2 - lam0 * sig_j ** 2, 0.5 * sigma_d ** 2)))
 
@@ -316,7 +322,8 @@ def forecast_day(
         cuts = segment_cuts(now_eff, end_utc)
         for j in event_segments(cuts, weights, event_times, int(jcfg["max_scheduled_events"])):
             scheduled[j] = float(np.sqrt(scheduled.get(j, 0.0) ** 2 + sigma_event ** 2))
-        notes.append("High-impact USD event today: extra variance added at the release, so the band is wider.")
+        notes.append(Note("Event USD berdampak tinggi hari ini",
+                          "Varians tambahan dimasukkan saat rilis, sehingga kisaran lebih lebar.", WARN))
 
     # ---- Monte Carlo
     seed = int(bundle.target_session.strftime("%Y%m%d"))
@@ -337,7 +344,11 @@ def forecast_day(
     bcfg = m["bias"]
     bias = "Bullish" if p_up >= bcfg["bull_above"] else "Bearish" if p_up <= bcfg["bear_below"] else "Netral"
     if p_up > 0.70 or p_up < 0.30:
-        notes.append(f"Directional probability {p_up:.0%} is unusually extreme; treat with caution.")
+        notes.append(Note("Peluang arah sangat ekstrem",
+                          f"Peluang candle naik {p_up:.0%}. Angka seperti ini cenderung muncul bila harga "
+                          f"sudah jauh dari open dan sisa sesi pendek; baca sebagai aritmetika harga saat "
+                          f"ini, bukan keyakinan arah (backtest tidak menunjukkan kemampuan menebak arah).",
+                          WARN))
 
     recent = ewma[-30:]
     vol_ratio = float(sigma_d / np.mean(recent)) if len(recent) else 1.0

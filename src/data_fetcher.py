@@ -27,6 +27,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
+from .notes import INFO, WARN, Note
+
 log = logging.getLogger(__name__)
 
 DAY = pd.Timedelta(days=1)
@@ -149,10 +151,11 @@ def drop_empty_holiday_sessions(candles: pd.DataFrame, cfg: dict) -> tuple[pd.Da
         h = holiday_for(label, cfg)
         if h and h["absent_ok"] and bars < floor:
             drop.append(label)
-            notes.append(
-                f"{label.date()} ({h['name']}): only {int(bars)} hourly bar(s); candle excluded "
-                f"from history (market effectively closed)."
-            )
+            notes.append(Note(
+                "Sesi libur dikecualikan",
+                f"{label.date()} ({h['name']}) hanya punya {int(bars)} bar per jam, jadi candle itu "
+                f"tidak dipakai di riwayat (pasar praktis tutup).", INFO,
+            ))
     if drop:
         candles = candles.drop(index=drop)
     return candles, notes
@@ -163,10 +166,11 @@ def holiday_target_note(target: pd.Timestamp, cfg: dict) -> list[str]:
     h = holiday_for(target, cfg)
     if not h:
         return []
-    return [
-        f"US holiday session ({h['name']}): liquidity is usually thin and gaps are more likely; "
-        f"treat today's range with extra caution."
-    ]
+    return [Note(
+        f"Sesi libur AS ({h['name']})",
+        "Likuiditas biasanya tipis dan gap lebih mungkin; perlakukan kisaran hari ini dengan "
+        "ekstra hati-hati.", WARN,
+    )]
 
 
 # --------------------------------------------------------------------------
@@ -299,10 +303,11 @@ def validate_candles(
             cand = _previous_weekday(cand)
             if cand == last_label:
                 accepted = True
-                warnings.append(
-                    f"No candle for {expected_last.date()} ({h['name']}): market effectively closed; "
-                    f"history ends on {last_label.date()}."
-                )
+                warnings.append(Note(
+                    "Tidak ada candle di hari libur",
+                    f"Tidak ada candle untuk {expected_last.date()} ({h['name']}): pasar praktis tutup, "
+                    f"jadi riwayat berakhir di {last_label.date()}.", INFO,
+                ))
                 break
         if not accepted:
             raise DataError(
@@ -317,10 +322,12 @@ def validate_candles(
             h = holiday_for(last_label, cfg)
             floor = min(need, d.get("holiday_min_bars", need))
             if h and bars >= floor:
-                warnings.append(
-                    f"Thin liquidity on {last_label.date()} ({h['name']}): {bars} hourly bars "
-                    f"(normal >= {need}); accepted as a US-holiday session."
-                )
+                warnings.append(Note(
+                    "Likuiditas tipis di riwayat",
+                    f"Candle terbaru ({last_label.date()}, {h['name']}) hanya punya {bars} bar per jam "
+                    f"(normalnya minimal {need}). Tetap dipakai karena itu sesi libur AS, tetapi "
+                    f"geraknya bisa kurang representatif.", WARN,
+                ))
             else:
                 extra = f"; holiday floor {floor} for {h['name']}" if h else ""
                 raise DataError(
@@ -332,15 +339,18 @@ def validate_candles(
     big = rets[rets > d["max_abs_daily_return"]]
     if len(big):
         days = ", ".join(str(i.date()) for i in big.index[-3:])
-        warnings.append(
-            f"{len(big)} daily move(s) above {d['max_abs_daily_return']:.0%} "
-            f"(latest: {days}); check for roll/gap artefacts."
-        )
+        warnings.append(Note(
+            "Lonjakan harian besar di riwayat",
+            f"{len(big)} pergerakan harian di atas {d['max_abs_daily_return']:.0%} (terakhir: {days}). "
+            f"Bot menandainya karena bisa berasal dari pergantian kontrak atau celah data. "
+            f"Bila pergerakannya nyata, ia ikut memengaruhi estimasi volatilitas.", WARN,
+        ))
 
     full = pd.bdate_range(candles.index[0], candles.index[-1])
     missing = len(full.difference(candles.index))
     if missing > d["max_missing_weekdays"]:
-        warnings.append(f"{missing} weekdays missing from history (holidays or data gaps).")
+        warnings.append(Note("Hari kerja hilang di riwayat",
+                             f"{missing} hari kerja tidak ada di riwayat (hari libur atau celah data).", INFO))
 
     return warnings
 
@@ -490,16 +500,18 @@ def _bundle_from_hourly(
         reference_price = float(last["Close"])
         reference_time = last["last_ts"]
         session_open = None
-        warnings.append(
-            "Weekend gap: the new week has no bars yet; reference price is Friday's close "
-            "and the forecast covers the whole Monday candle."
-        )
+        warnings.append(Note(
+            "Awal pekan",
+            "Sesi pekan baru belum punya bar: harga acuan adalah penutupan Jumat dan prakiraan "
+            "mencakup seluruh candle Senin.", INFO,
+        ))
 
     if is_futures:
-        warnings.append(
-            "Source is Futures (GC=F): price basis differs from spot by tens of dollars. "
-            "Use the ranges relative to your MT5 open, not the absolute levels."
-        )
+        warnings.append(Note(
+            "Sumber futures (GC=F)",
+            "Harga futures berbeda dari spot sekitar puluhan dolar. Pakai kisaran relatif terhadap "
+            "open MT5 Anda, bukan level absolutnya.", WARN,
+        ))
 
     return DataBundle(
         candles=complete[["Open", "High", "Low", "Close", "Volume", "bars"]],
@@ -537,12 +549,13 @@ def _bundle_from_daily(symbol: str, is_futures: bool, cfg: dict, now_utc: pd.Tim
     complete["bars"] = np.nan
     warnings = validate_candles(complete, cfg, expected_last=expected, check_bars=False)
     warnings += holiday_target_note(target_label(now_utc, tz, hour), cfg)
-    warnings.append(
-        "Daily fallback: Yahoo daily bars do not end exactly at 17:00 New York; "
-        "levels may differ from your MT5 candle."
-    )
+    warnings.append(Note(
+        "Data harian cadangan",
+        "Bar harian Yahoo tidak berakhir tepat pukul 17:00 New York, jadi level bisa berbeda "
+        "dari candle MT5 Anda.", WARN,
+    ))
     if is_futures:
-        warnings.append("Source is Futures (GC=F): basis differs from spot.")
+        warnings.append(Note("Sumber futures (GC=F)", "Basis futures berbeda dari spot.", WARN))
 
     last_bar = df.iloc[-1]
     return DataBundle(
@@ -636,7 +649,9 @@ def fetch_macro_daily(cfg: dict, now_utc: pd.Timestamp) -> tuple[Optional[pd.Dat
             clean.index = clean.index.tz_localize(None)
             closes[name] = clean["Close"][~clean.index.duplicated(keep="last")]
         except DataError as exc:
-            return None, [f"Macro data unavailable ({symbol}); regime uses gold-only features. ({exc})"]
+            return None, [Note("Data makro tidak tersedia",
+                               f"DXY/US10Y ({symbol}) gagal diambil, jadi rezim pasar hanya memakai "
+                               f"fitur emas. ({exc})", WARN)]
 
     frame = pd.DataFrame(closes).sort_index()
     frame = frame[frame.index <= now_utc.tz_localize(None).normalize()]

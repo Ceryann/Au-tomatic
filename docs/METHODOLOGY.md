@@ -73,7 +73,7 @@ Walk-forward pada 120 sesi emas asli (21 November 2026):
 | Direction Brier | 0,2484 (acak = 0,2500) | **tidak ada kemampuan menebak arah** |
 | Ekstrapolasi tren penuh | Brier 0,2488; 2 panggilan arah, 1 benar | tidak membantu |
 
-Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Low**. Label Bullish atau Bearish hampir tidak pernah muncul, dan itu disengaja: ambang (`model.bias`) tidak diturunkan demi menghasilkan sinyal.
+Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Low**. Pada run di awal sesi (kondisi backtest) label Bullish atau Bearish hampir tidak pernah muncul, dan itu disengaja: ambang (`model.bias`) tidak diturunkan demi menghasilkan sinyal. Pada run yang lebih siang label sering muncul karena peluang dihitung dari harga terakhir dan sisa sesi, sehingga ia hanya mencerminkan posisi harga terhadap open. Uji 26 Nov 2026 pada 150 hari sintetis tanpa kemampuan arah: label non-Netral muncul pada 56% run di jam 0,5 sejak open (data sintetis punya tren bawaan, jadi angka ini tidak mewakili emas) dan 95% pada jam 17, sedangkan kesesuaian label dengan arah penutupan naik dari 57% ke 87% tanpa ada keahlian. Label run siang tidak boleh dipakai sebagai bukti akurasi arah.
 
 ## 7. Batasan dan hal yang belum terverifikasi
 

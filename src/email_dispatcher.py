@@ -19,8 +19,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from .data_fetcher import DataBundle
+from .data_fetcher import DataBundle, session_end_utc
 from .news_sentinel import NewsReport
+from .notes import WARN, note_level, note_title
 from .quant_engine import Forecast
 
 log = logging.getLogger(__name__)
@@ -138,6 +139,157 @@ def _signed(x: float) -> str:
 _BIAS_COLOR = {"Bullish": "#15803d", "Bearish": "#b91c1c", "Netral": "#4b5563"}
 
 
+# --------------------------------------------------------------------------
+# Forecast-email building blocks: timing banner, range bar, grouped notes
+# --------------------------------------------------------------------------
+_BAR_TRACK, _BAR_RANGE, _BAR_OPEN, _BAR_REF = "#e5e7eb", "#f59e0b", "#374151", "#2563eb"
+_BAR_CELLS = 50                      # 50 cells x 2% = the full width; plain table cells survive Gmail
+
+
+def _hm(hours: float) -> str:
+    """'7 jam 57 menit', '45 menit' (never negative)."""
+    minutes = max(int(round(hours * 60)), 0)
+    h, m = divmod(minutes, 60)
+    if h and m:
+        return f"{h} jam {m} menit"
+    return f"{h} jam" if h else f"{m} menit"
+
+
+def run_timing(bundle: DataBundle, fc: Forecast, cfg: dict) -> dict | None:
+    """Where in the candle the run happened: hours since it opened, hours left, share of the day's
+    variance still to come. None if anything is missing (the email then simply omits the timing)."""
+    try:
+        tz, hour = cfg["market"]["candle_cutoff_tz"], cfg["market"]["candle_cutoff_hour"]
+        start = session_end_utc(bundle.target_session - pd.Timedelta(days=1), tz, hour)
+        end = session_end_utc(bundle.target_session, tz, hour)
+        elapsed = (bundle.now_utc - start).total_seconds() / 3600.0
+        left = (end - bundle.now_utc).total_seconds() / 3600.0
+        late_after = float(cfg["email"].get("late_run_hours", 2.0))
+        return {"elapsed_h": max(elapsed, 0.0), "left_h": max(left, 0.0),
+                "rem_frac": float(fc.remaining_var_frac), "late": elapsed >= late_after}
+    except Exception as exc:  # noqa: BLE001 - optional block, must never break the main email
+        log.warning("Run timing unavailable (%s).", type(exc).__name__)
+        return None
+
+
+def _ref_time_txt(bundle: DataBundle, tz: str) -> str:
+    """Clock time of the reference price; with the date too when it is not from the last hours."""
+    age_h = (bundle.now_utc - bundle.reference_time_utc).total_seconds() / 3600.0
+    return _to_local(bundle.reference_time_utc, tz) if age_h > 12 else news_time(bundle.reference_time_utc, tz)
+
+
+def _basis_text(bundle: DataBundle, timing: dict | None, tz: str) -> str:
+    base = (f"Dihitung {news_time(bundle.now_utc, tz)} WIB dari harga terakhir "
+            f"{_usd(bundle.reference_price, 2)} (jam {_ref_time_txt(bundle, tz)} WIB)")
+    if timing is None:
+        return base + "."
+    return (f"{base}; sisa sesi sekitar {_hm(timing['left_h'])}, "
+            f"kira-kira {timing['rem_frac']:.0%} variansi harian masih tersisa.")
+
+
+def _late_text(bundle: DataBundle, timing: dict, tz: str) -> str:
+    return (f"Run terlambat. Dibuat {news_time(bundle.now_utc, tz)} WIB, {_hm(timing['elapsed_h'])} setelah "
+            f"candle dibuka. Kisaran di bawah dihitung dari harga terakhir dan sisa sesi, bukan kisaran "
+            f"pagi, jadi bisa berbeda dari email sebelumnya hari ini.")
+
+
+def _late_banner_html(text: str) -> str:
+    head, _, rest = text.partition(". ")
+    return ('<tr><td style="padding:6px 20px;font-size:13px;color:#92400e;background:#fffbeb;'
+            f'border-top:1px solid #fde68a;border-bottom:1px solid #fde68a;"><b>{html.escape(head)}.</b> '
+            f'{html.escape(rest)}</td></tr>')
+
+
+def _range_bar_html(lo: float, hi: float, o: float, ref: float, open_known: bool) -> str:
+    """One thin bar: the 70% close range in amber, with the open and the latest price as markers.
+    Plain table cells with a background colour, so it renders in Gmail without images or SVG."""
+    pts = [lo, hi, o, ref]
+    span = max(pts) - min(pts)
+    if not span > 0:
+        return ""
+    a, b = min(pts) - span * 0.10, max(pts) + span * 0.10
+
+    def idx(x: float) -> int:
+        return min(_BAR_CELLS - 1, max(0, int((x - a) / (b - a) * _BAR_CELLS)))
+
+    i_lo, i_hi, i_o, i_ref = idx(lo), idx(hi), idx(o), idx(ref)
+    cells = []
+    for i in range(_BAR_CELLS):
+        color = (_BAR_REF if i == i_ref else _BAR_OPEN if (open_known and i == i_o)
+                 else _BAR_RANGE if i_lo <= i <= i_hi else _BAR_TRACK)
+        cells.append(f'<td width="2%" height="12" bgcolor="{color}" '
+                     f'style="background:{color};font-size:0;line-height:0;">&nbsp;</td>')
+    open_txt = (f'<span style="color:{_BAR_OPEN};">&#9632;</span> open {_usd(o, 2)}'
+                if open_known else "")
+    legend = (f'<span style="color:{_BAR_RANGE};">&#9632;</span> kisaran close 70% &nbsp; '
+              + (open_txt + " &nbsp; " if open_txt else "")
+              + f'<span style="color:{_BAR_REF};">&#9632;</span> harga terakhir {_usd(ref, 2)}')
+    return ('<tr><td style="padding:2px 20px 4px 20px;">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="table-layout:fixed;border-collapse:collapse;"><tr>' + "".join(cells) + "</tr></table>"
+            f'<div style="font-size:11px;color:#6b7280;padding-top:4px;">{legend}</div></td></tr>')
+
+
+def _bias_basis_text(bundle: DataBundle, fc: Forecast, late: bool) -> str:
+    """One plain sentence under the headline: what the Bullish/Bearish/Netral word is actually based on.
+    The word is a thresholded P(close > open) given the latest price, so it follows where the price sits
+    relative to the open; it is not a direction call (the backtest finds no directional skill)."""
+    rem = f"sisa variansi harian {fc.remaining_var_frac:.0%}"
+    if fc.open_known:
+        delta = bundle.reference_price - fc.open_price
+        side = ("hampir sama dengan" if abs(delta) < 0.5
+                else f"{_usd(abs(delta), 2)} {'di atas' if delta > 0 else 'di bawah'}")
+        first = (f"Dasar label: harga terakhir {_usd(bundle.reference_price, 2)}, {side} "
+                 f"open {_usd(fc.open_price, 2)}; {rem}.")
+    else:
+        first = f"Dasar label: candle belum dibuka, peluang dihitung terhadap harga acuan; {rem}."
+    second = ("Ini posisi harga di tengah sesi, bukan prediksi arah dari awal sesi." if late else
+              "Backtest: arah harian tidak bisa ditebak, jadi label ini ringkasan peluang, bukan sinyal.")
+    return f"{first} {second}"
+
+
+def _dedupe_notes(notes) -> list:
+    seen, out = set(), []
+    for n in notes:
+        if str(n) not in seen:
+            seen.add(str(n))
+            out.append(n)
+    return out
+
+
+def _notes_html(notes: list) -> str:
+    """Grouped notes: 'Perlu diperhatikan' (amber) first, then 'Info' (grey), each with a bold title."""
+    if not notes:
+        return ""
+    groups = [
+        ("Perlu diperhatikan", [n for n in notes if note_level(n) == WARN], "#d97706", "#fffbeb", "#92400e"),
+        ("Info", [n for n in notes if note_level(n) != WARN], "#9ca3af", "#f3f4f6", "#374151"),
+    ]
+    out = []
+    for heading, items, bar, bg, fg in groups:
+        if not items:
+            continue
+        body = "".join(
+            f'<div style="border-left:3px solid {bar};padding:1px 0 1px 10px;margin:6px 0;">'
+            + (f"<b>{html.escape(note_title(n))}</b><br>" if note_title(n) else "")
+            + f"{html.escape(str(n))}</div>"
+            for n in items
+        )
+        out.append(f'<tr><td style="padding:8px 20px;font-size:12px;color:{fg};background:{bg};">'
+                   f'<b style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;">{heading}</b>{body}</td></tr>')
+    return "".join(out)
+
+
+def _notes_plain(notes: list) -> list[str]:
+    lines: list[str] = []
+    for heading, items in (("PERLU DIPERHATIKAN:", [n for n in notes if note_level(n) == WARN]),
+                           ("INFO:", [n for n in notes if note_level(n) != WARN])):
+        if items:
+            lines += ([""] if lines else []) + [heading] + [
+                f"- {note_title(n)}: {n}" if note_title(n) else f"- {n}" for n in items]
+    return lines
+
+
 def build_forecast_email(
     bundle: DataBundle, fc: Forecast, cfg: dict, accuracy: dict | None = None,
     news: NewsReport | None = None,
@@ -151,10 +303,15 @@ def build_forecast_email(
     futures = bundle.is_futures
     tag = " (Futures, basis != spot)" if futures else ""
 
+    timing = run_timing(bundle, fc, cfg)
+    is_late = bool(timing and timing["late"])
+    bias_txt = f"{fc.bias} \u00b7 tengah sesi" if is_late else fc.bias     # a late run reads the price so far
+    bias_basis = _bias_basis_text(bundle, fc, is_late)
+
     # The bias word is only informative when it leaves the Netral zone, so it is omitted otherwise.
     core = f"Close {_usd(c15)}\u2013{_usd(c85)} | H ~{_usd(h50)} | L ~{_usd(l50)}"
     if fc.bias != "Netral":
-        core = f"{fc.bias} | {core}"
+        core = f"{fc.bias}{' (tengah sesi)' if is_late else ''} | {core}"
     subject = f"{cfg['email']['subject_prefix']} {core}{tag}"
 
     open_label = "Open candle" if fc.open_known else "Harga acuan (open belum ada)"
@@ -200,9 +357,22 @@ def build_forecast_email(
         _row("Perkiraan Low", f"{_usd(l50)} <span style='font-weight:normal;font-size:13px;'>"
                               f"(kisaran {_usd(l15)} \u2013 {_usd(l85)}; {_signed(l50 - o)} dari open)</span>"),
         _row("Median close / peluang candle naik",
-             f"{_usd(c50)} &middot; <span style='color:{color};'>{fc.p_up:.0%} ({html.escape(fc.bias)})</span>"),
+             f"{_usd(c50)} &middot; <span style='color:{color};'>{fc.p_up:.0%} ({html.escape(bias_txt)})</span>"),
+        f'<tr><td style="padding:0 20px 8px 20px;font-size:11px;color:#6b7280;">{html.escape(bias_basis)}</td></tr>',
     ]
-    rows_html = "".join(rows)
+    late_txt = _late_text(bundle, timing, tz) if is_late else ""
+    basis_txt = _basis_text(bundle, timing, tz)
+    try:
+        bar_html = _range_bar_html(c15, c85, o, bundle.reference_price, fc.open_known)
+    except Exception as exc:  # noqa: BLE001 - decoration only
+        log.warning("Range bar skipped (%s).", type(exc).__name__)
+        bar_html = ""
+    rows_html = (
+        (_late_banner_html(late_txt) if late_txt else "")
+        + rows[0] + bar_html
+        + f'<tr><td style="padding:0 20px 6px 20px;font-size:11px;color:#6b7280;">{html.escape(basis_txt)}</td></tr>'
+        + "".join(rows[1:])
+    )
     rows_html += (
         '<tr><td style="padding:6px 20px;font-size:13px;color:#374151;">'
         "<ul style='margin:0 0 0 18px;padding:0;'>"
@@ -252,12 +422,8 @@ def build_forecast_email(
     all_warnings = list(bundle.warnings) + list(fc.notes)
     if news is not None:
         all_warnings += [n_ for n_ in news.notes if "radar berita" not in n_]
-    if all_warnings:
-        items = "".join(f"<li>{html.escape(w)}</li>" for w in all_warnings)
-        rows_html += (
-            '<tr><td style="padding:8px 20px;font-size:12px;color:#92400e;background:#fffbeb;">'
-            f"<b>Catatan</b><ul style='margin:4px 0 0 18px;padding:0;'>{items}</ul></td></tr>"
-        )
+    all_warnings = _dedupe_notes(all_warnings)
+    rows_html += _notes_html(all_warnings)
 
     news_note = (
         "Berita hanya ditampilkan dan tidak mengubah angka; event berisiko tinggi melebarkan kisaran. "
@@ -276,13 +442,17 @@ def build_forecast_email(
         f"  relatif open      : {_signed(c15 - o)} s/d {_signed(c85 - o)} (open {_usd(o, 2)})",
         f"Perkiraan High      : {_usd(h50)} (kisaran {_usd(h15)} - {_usd(h85)})",
         f"Perkiraan Low       : {_usd(l50)} (kisaran {_usd(l15)} - {_usd(l85)})",
-        f"Median close        : {_usd(c50)} | peluang candle naik {fc.p_up:.0%} ({fc.bias})",
+        f"Median close        : {_usd(c50)} | peluang candle naik {fc.p_up:.0%} ({bias_txt})",
+        bias_basis,
+        basis_txt,
         "",
     ] + [f"- {c}" for c in context]
+    if late_txt:
+        plain.insert(1, late_txt)
     if news_plain:
         plain += [""] + news_plain
     if all_warnings:
-        plain += ["", "CATATAN:"] + [f"- {w}" for w in all_warnings]
+        plain += [""] + _notes_plain(all_warnings)
     plain += ["", f"Sumber: {bundle.source_label}", DISCLAIMER]
     return subject, body, "\n".join(plain)
 

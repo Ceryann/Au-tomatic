@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import test_data_layer as T  # noqa: E402
 import test_ledger as L  # noqa: E402
+from src.notes import note_title  # noqa: E402
 import test_models as M  # noqa: E402
 from src import news_sentinel as ns  # noqa: E402
 from src.email_dispatcher import build_forecast_email  # noqa: E402
@@ -282,7 +283,7 @@ def test_event_day_widens_the_forecast_band_through_the_model():
     base = forecast_day(b, None, cfg)
     ev = forecast_day(b, None, cfg, event_today=True)
     assert (ev.close_q[2] - ev.close_q[0]) > (base.close_q[2] - base.close_q[0])
-    assert any("High-impact USD event" in n for n in ev.notes)
+    assert any("berdampak tinggi" in note_title(n) for n in ev.notes)
 
 
 # ------------------------------------------------------------------ end to end
