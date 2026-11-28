@@ -82,7 +82,7 @@ Kesimpulan: nilai bot ada pada **kisaran yang terkalibrasi dan perkiraan High/Lo
 Repo → *Settings → Secrets and variables → Actions → New repository secret*. Daftar lengkap lima secret yang dibutuhkan ada di tabel pada bagian *Pengiriman email dan secret* di bawah. `EMAIL_TO` boleh berisi beberapa alamat dipisah koma (saling tersembunyi).
 
 ### 3. Jalankan
-*Actions → Au-tomatic Daily → Run workflow*. Pertama dengan **dry_run dicentang** (memeriksa seluruh jalur tanpa mengirim email dan tanpa mencetak level harga), lalu tanpa centang untuk mengirim email sungguhan. Jadwal otomatis: **Minggu sampai Kamis 22:30 UTC** (Senin sampai Jumat 05:30 WIB).
+*Actions → Au-tomatic Daily → Run workflow*. Pertama dengan **dry_run dicentang** (memeriksa seluruh jalur tanpa mengirim email dan tanpa mencetak level harga), lalu tanpa centang untuk mengirim email sungguhan. Jadwal otomatis: **Minggu sampai Kamis 22:30 UTC** (Senin sampai Jumat 05:30 WIB). Pada 25 sampai 27 November 2026 run terjadwal justru mulai sekitar pukul 11:00 WIB (5,5 sampai 6,5 jam terlambat). Itu keterlambatan di sisi GitHub, yang pada periode yang sama banyak dilaporkan pengguna lain, bukan masalah kode. Jika Anda ingin email pagi yang tepat waktu, tekan *Run workflow* secara manual di pagi hari; run terjadwal pukul 11:00 tidak akan menimpa baris ledger milik run pagi itu.
 
 ### Di komputer sendiri (Windows PowerShell)
 
@@ -110,6 +110,7 @@ python main.py --dry-run --explain               # out\preview.html dan out\repo
 | Perintah | Fungsi |
 |---|---|
 | `python tools/backtest.py --sessions 120` | uji walk-forward di data asli (3 sampai 4 credits) |
+| `python tools/backtest.py --run-after-open-h 6` | backtest yang meniru run terlambat (model sudah mengetahui 6 jam pertama candle); bandingkan dengan ledger live saat run terjadwal tiba pukul 11:00 WIB |
 | `... --set model.drift.k_kalman=1 --set model.drift.cap_sigma_mult=10` | uji ekstrapolasi tren penuh |
 | `python tools/event_study.py` | ukur apakah hari FOMC lebih bergejolak, dan sarankan `event_extra_var` |
 | `python tools/compare_mt5.py XAUUSD_D1.csv` | bandingkan dengan ekspor D1 dari MT5 Anda |
@@ -123,7 +124,7 @@ Ekspor MT5: *View → Symbols → tab Bars* → simbol emas, D1, 60+ hari → *E
 
 ## Ledger akurasi live
 
-Setiap run sungguhan menambah satu baris ke `data/predictions_log.csv`, dan workflow meng-commit-nya. Esok harinya baris itu "diselesaikan": apakah close, high, dan low jatuh di dalam kisaran. Isi ledger aman untuk repo Public: hanya selisih relatif (pecahan), probabilitas, rezim, dan penanda 0/1. **Tidak ada harga mentah.** Commit harian juga menjaga jadwal tetap aktif (GitHub mematikan jadwal di repo Public setelah 60 hari tanpa aktivitas).
+Setiap sesi mendapat satu baris di `data/predictions_log.csv`, dan workflow meng-commit-nya. **Run pertama untuk sesi itu yang menang**: run berikutnya di sesi yang sama (misalnya run terjadwal yang GitHub mulai terlambat) tidak menimpa barisnya, karena akurasi live harus menggambarkan prakiraan yang dibuat dekat open. Gunakan `python main.py --replace-ledger` bila memang ingin menimpa. Kolom `elapsed_h` mencatat berapa jam setelah candle dibuka run itu terjadi, dan ringkasan akurasi live di email menyebut campuran run tepat waktu dan tengah sesi. Esok harinya baris itu "diselesaikan": apakah close, high, dan low jatuh di dalam kisaran. Isi ledger aman untuk repo Public: hanya selisih relatif (pecahan), probabilitas, rezim, dan penanda 0/1. **Tidak ada harga mentah.** Commit harian juga menjaga jadwal tetap aktif (GitHub mematikan jadwal di repo Public setelah 60 hari tanpa aktivitas).
 
 ## Pengiriman email dan secret
 
@@ -173,7 +174,7 @@ docs/                       # METHODOLOGY.md, contoh sintetis (samples/, img/)
 - Pengaruh event dikalibrasi dari hari FOMC yang hanya sekitar 20 sampai 23 hari, jadi selang kepercayaannya lebar. `event_extra_var` bawaan (0,5) adalah prior yang wajar, bukan hasil pasti.
 - Feed berita dan kalender gratis bisa berubah atau mati. Feed yang gagal dilewati dan email menyebutkannya.
 - Hari libur AS: sesi yang terdaftar di `data.holidays` (config.yaml) diperiksa dengan ambang bar lebih rendah (`holiday_min_bars`) dan, bila `absent_ok`, boleh kosong; email diberi catatan likuiditas tipis. Daftar dan ambang ini sudah dicocokkan dengan `probe_holidays.py` pada data asli (25 Nov 2026, 726 sesi): sesi libur tertipis yang masih punya bar adalah 18, jadi `holiday_min_bars` adalah batas bawah yang longgar, bukan angka terukur. Pada 2024 feed kosong di 25 Des, 1 Jan, dan Jumat Agung, tetapi pada 2025 sampai 2026 feed punya bar penuh di tanggal-tanggal itu, sehingga `absent_ok` hanya menoleransi sesi kosong dan tidak memaksa email libur. Entri akhir 2027 dihitung dari aturan kalender dan belum terlihat di feed. Hari tipis yang tidak terdaftar tetap ditolak. Jika sesi target adalah hari libur `absent_ok` (mis. 25 Des, 1 Jan, Jumat Agung) **dan** semua sumber data gagal, bot mengirim email singkat "Pasar libur hari ini" (tanpa angka, run hijau) dan alasan teknisnya hanya dicatat di log; di hari lain kegagalan data tetap menjadi email error.
-- Waktu run memengaruhi angka. Kisaran dihitung dari harga terakhir dan sisa sesi, jadi run yang terlambat (cron GitHub pernah tertunda sekitar 6,5 jam) memberi angka yang berbeda dan lebih sempit daripada run pukul 05:30 WIB. Ledger menyimpan satu baris per sesi dan run ulang menimpanya, sehingga baris dari run terlambat tidak sebanding dengan backtest atau run tepat waktu; jam pembuatannya tercatat di `created_utc`.
+- Waktu run memengaruhi angka. Kisaran dihitung dari harga terakhir dan sisa sesi, jadi run yang terlambat (cron GitHub pernah tertunda sekitar 6,5 jam) memberi angka yang berbeda dan lebih sempit daripada run pukul 05:30 WIB. Ledger menyimpan run pertama per sesi dan mencatat `elapsed_h`, tetapi bila run pertama itu sendiri terlambat (misalnya hanya run terjadwal pukul 11:00), barisnya tetap prakiraan tengah sesi dan tidak sebanding dengan backtest standar. Untuk perbandingan yang adil jalankan backtest pada jam yang sama, misalnya `python tools/backtest.py --run-after-open-h 6`.
 - Sentimen berita memakai kamus heuristik yang tidak bisa divalidasi (tidak ada arsip berita historis), sehingga hanya ditampilkan.
 
 ## Roadmap

@@ -332,9 +332,15 @@ def build_forecast_email(
     )
     if accuracy is not None:
         if accuracy.get("ready"):
+            timing_split = ""
+            if accuracy.get("n_ontime", 0) + accuracy.get("n_late", 0) > 0:
+                timing_split = (f" Campuran run: tepat waktu n={accuracy.get('n_ontime', 0)}, "
+                                f"tengah sesi n={accuracy.get('n_late', 0)} (run tengah sesi sudah mengetahui "
+                                f"sebagian harga hari itu, jadi tidak sebanding dengan run di awal sesi).")
             context.append(
                 f"Akurasi live {accuracy['n']} hari terakhir: close {accuracy['close']:.0%}, "
                 f"high {accuracy['high']:.0%}, low {accuracy['low']:.0%} berada di dalam kisaran (target 70%)."
+                + timing_split
             )
         else:
             context.append(

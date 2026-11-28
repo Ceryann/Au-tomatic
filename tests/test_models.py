@@ -538,6 +538,32 @@ def test_headline_basis_before_the_candle_opens_says_so():
     assert "Dasar label: candle belum dibuka" in html_body and "Dasar label: candle belum dibuka" in text
 
 
+def test_backtest_can_run_at_a_later_hour_to_mimic_a_delayed_cron():
+    from src.evaluation import run_backtest
+
+    cfg = fast_cfg()
+    full = T.make_hourly(T.FIRST_SUNDAY, 111, seed=51, start_price=3000.0)
+    early = run_backtest(full, cfg, n_sessions=8)
+    late = run_backtest(full, cfg, n_sessions=8, run_after_open_h=6.0)
+    assert early.run_after_open_h == 0.5 and late.run_after_open_h == 6.0
+    assert any("0.5 h after the candle opened" in x and "nominal" in x for x in early.lines())
+    assert any("6 h after the candle opened" in x and "delayed run" in x for x in late.lines())
+    move = lambda r: float(((r.table["ref"] / r.table["open"]) - 1.0).abs().mean())
+    assert move(late) > move(early), "6 h into the candle the latest price has moved further from the open"
+
+
+def test_live_accuracy_line_reports_the_run_timing_mix():
+    b, fc, cfg, _ = _email_at(0.0)
+    acc = {"n": 12, "ready": True, "min_n": 10, "close": 0.7, "high": 0.75, "low": 0.65,
+           "n_ontime": 7, "n_late": 5, "n_unknown": 0}
+    _, html_body, text = build_forecast_email(b, fc, cfg, accuracy=acc)
+    for blob in (html_body, text):
+        assert "tepat waktu n=7, tengah sesi n=5" in blob
+    old = dict(acc, n_ontime=0, n_late=0, n_unknown=12)                 # ledger rows written before elapsed_h existed
+    _, html2, text2 = build_forecast_email(b, fc, cfg, accuracy=old)
+    assert "Campuran run" not in html2 and "Campuran run" not in text2 and "Akurasi live 12 hari terakhir" in text2
+
+
 def test_optional_blocks_never_break_the_main_email():
     b, fc, cfg, _ = _email_at(0.0)
     real_bar, real_timing = em_mod._range_bar_html, em_mod.run_timing

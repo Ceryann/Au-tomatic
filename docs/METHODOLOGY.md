@@ -38,7 +38,7 @@ Kalender ForexFactory (JSON mingguan) dan RSS Google News dibaca; kalender cadan
 
 ## 4. Ledger akurasi live
 
-`data/predictions_log.csv` hanya menyimpan pecahan relatif terhadap harga dasar, probabilitas, rezim, dan penanda 0/1 (kena atau tidak). **Tanpa harga mentah**, sesuai syarat Twelve Data paket gratis dan karena repo ini publik. Ledger di-commit otomatis oleh workflow dan akurasi 30 hari tampil di email setelah 10 hari data.
+`data/predictions_log.csv` hanya menyimpan pecahan relatif terhadap harga dasar, probabilitas, rezim, dan penanda 0/1 (kena atau tidak). **Tanpa harga mentah**, sesuai syarat Twelve Data paket gratis dan karena repo ini publik. Ledger di-commit otomatis oleh workflow dan akurasi 30 hari tampil di email setelah 10 hari data. Satu sesi satu baris, dan **run pertama menang**: run berikutnya di sesi yang sama tidak menimpa (opsi `--replace-ledger` untuk menimpa sengaja). Kolom `elapsed_h` mencatat jam sejak candle dibuka. Alasannya: prakiraan dihitung dari harga terakhir dan sisa sesi, sehingga run tengah sesi sudah mengetahui sebagian hari itu dan cakupannya tidak sebanding dengan run di awal sesi. Backtest standar mensimulasikan run 0,5 jam setelah open; `--run-after-open-h` mensimulasikan jam lain, misalnya 6 jam untuk meniru keterlambatan jadwal GitHub yang teramati pada 25 sampai 27 November 2026.
 
 ## 5. Cara menguji
 

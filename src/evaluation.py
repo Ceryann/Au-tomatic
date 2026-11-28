@@ -55,10 +55,14 @@ class BacktestReport:
     call_hit_rate: float | None
     n_calls: int
     table: pd.DataFrame
+    run_after_open_h: float = 0.5
 
     def lines(self) -> list[str]:
         se = lambda p: 1.96 * np.sqrt(max(p * (1 - p), 1e-9) / max(self.n, 1))
         out = [f"Sessions evaluated: {self.n} (skipped {self.skipped})",
+               f"Run time: {self.run_after_open_h:g} h after the candle opened"
+               + (" (the scheduled cron's nominal time)" if abs(self.run_after_open_h - 0.5) < 1e-9 else
+                  " (mimics a delayed run: the model sees that much of the day already)"),
                "",
                "Coverage of the P15-P85 band (target: 15% below / 70% inside / 15% above)"]
         for k, (b, i, a) in self.cover.items():
@@ -81,6 +85,7 @@ class BacktestReport:
 def run_backtest(
     hourly_full: pd.DataFrame, cfg: dict, n_sessions: int = 120, symbol: str = "XAU/USD",
     is_futures: bool = False, macro: pd.DataFrame | None = None, progress: bool = False,
+    run_after_open_h: float = 0.5,
 ) -> BacktestReport:
     tz, hour = cfg["market"]["candle_cutoff_tz"], cfg["market"]["candle_cutoff_hour"]
     end_probe = hourly_full.index[-1] + pd.Timedelta(hours=2)
@@ -92,7 +97,7 @@ def run_backtest(
     skipped = 0
     for i, label in enumerate(labels):
         start = session_end_utc(label - pd.Timedelta(days=1), tz, hour)
-        now = start + pd.Timedelta(minutes=30)
+        now = start + pd.Timedelta(hours=run_after_open_h)
         cut = hourly_full[hourly_full.index <= now].copy()
         if cut.empty:
             skipped += 1
@@ -153,6 +158,7 @@ def run_backtest(
         n=len(df), skipped=skipped, cover=cover,
         pinball_model=float(df["pin_model"].mean()), pinball_baseline=float(df["pin_base"].mean()),
         brier=brier, brier_baseline=0.25, call_hit_rate=hit, n_calls=len(calls), table=df,
+        run_after_open_h=run_after_open_h,
     )
 
 

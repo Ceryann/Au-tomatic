@@ -6,6 +6,7 @@ PowerShell (venv active, from the au-tomatic folder):
 
 Options:
     --sessions N   how many past sessions to evaluate (default 120)
+    --run-after-open-h H   hours after the candle opened to forecast at (default 0.5; try 6 for a delayed cron)
     --yahoo        use Yahoo GC=F futures instead (no API key needed; levels are futures)
     --macro        also use DXY / US10Y features (needs Yahoo; slower)
     --set K=V      override a config value, repeatable, e.g.
@@ -46,6 +47,8 @@ from src.evaluation import run_backtest  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sessions", type=int, default=120)
+    ap.add_argument("--run-after-open-h", type=float, default=0.5,
+                    help="Hours after the candle opened at which each session is forecast (default 0.5, the cron's nominal time; use 6 to mimic the 5-6 hour delay GitHub adds to scheduled runs).")
     ap.add_argument("--yahoo", action="store_true")
     ap.add_argument("--macro", action="store_true")
     ap.add_argument("--set", action="append", default=[], metavar="K=V", help="Override config, e.g. model.drift.k_kalman=1")
@@ -93,7 +96,8 @@ def main() -> int:
     span = (hourly.index[-1] - hourly.index[0]).days
     print(f"{symbol}: {len(hourly)} hourly bars, {span} days. Evaluating the last {args.sessions} sessions...")
     report = run_backtest(
-        hourly, cfg, n_sessions=args.sessions, symbol=symbol, is_futures=fut, macro=macro, progress=True
+        hourly, cfg, n_sessions=args.sessions, symbol=symbol, is_futures=fut, macro=macro, progress=True,
+        run_after_open_h=args.run_after_open_h,
     )
     print()
     print("\n".join(report.lines()))

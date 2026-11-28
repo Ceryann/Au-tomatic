@@ -32,9 +32,10 @@ COLUMNS = [
     "session", "created_utc", "source", "quality", "open_known",
     "c15", "c50", "c85", "h15", "h50", "h85", "l15", "l50", "l85",
     "p_up", "bias", "regime", "sigma_d",
-    "settled", "close_hit", "high_hit", "low_hit", "up_actual", "event",
+    "settled", "close_hit", "high_hit", "low_hit", "up_actual", "event", "elapsed_h",
 ]
-OPTIONAL_COLS = ["event"]       # columns added after the first release; old files get NaN
+OPTIONAL_COLS = ["event", "elapsed_h"]   # columns added after the first release; old files get NaN
+EXTRA_NUMERIC_COLS = ["elapsed_h"]       # hours (not a fraction), so it is not in FLOAT_COLS
 FLOAT_COLS = ["c15", "c50", "c85", "h15", "h50", "h85", "l15", "l50", "l85", "p_up", "sigma_d"]
 FLAG_COLS = ["settled", "close_hit", "high_hit", "low_hit", "up_actual", "open_known", "event"]
 
@@ -55,7 +56,7 @@ def load_ledger(path: str | Path) -> pd.DataFrame:
     missing = [c for c in COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Ledger is missing columns: {missing}")
-    for c in FLOAT_COLS + FLAG_COLS:
+    for c in FLOAT_COLS + FLAG_COLS + EXTRA_NUMERIC_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df[COLUMNS].reset_index(drop=True)
 
@@ -69,11 +70,19 @@ def save_ledger(df: pd.DataFrame, path: str | Path) -> None:
     tmp.replace(path)                                   # atomic: never leaves a half-written file
 
 
+def session_has_row(ledger: pd.DataFrame, session: str) -> bool:
+    return bool((ledger["session"] == session).any())
+
+
 def upsert_forecast(
     ledger: pd.DataFrame, fc: Forecast, bundle: DataBundle, now_utc: pd.Timestamp,
-    event_flag: bool = False,
+    event_flag: bool = False, elapsed_h: float | None = None, replace: bool = False,
 ) -> pd.DataFrame:
-    """Add today's forecast (replacing a re-run for the same session)."""
+    """Add today's forecast. The FIRST run recorded for a session wins: a later re-run (for example the
+    scheduled run that GitHub starts hours late) leaves the earlier row alone, because the live accuracy
+    must describe the forecast made close to the candle's open. `replace=True` overwrites on purpose.
+
+    `elapsed_h` is how many hours after the candle opened this run happened, so late rows can be told apart."""
     base = float(fc.open_price)
     rel = lambda v: float(v) / base - 1.0
     row = {
@@ -88,7 +97,10 @@ def upsert_forecast(
         "p_up": float(fc.p_up), "bias": fc.bias, "regime": fc.regime, "sigma_d": float(fc.sigma_d),
         "settled": 0, "close_hit": np.nan, "high_hit": np.nan, "low_hit": np.nan, "up_actual": np.nan,
         "event": int(event_flag),
+        "elapsed_h": np.nan if elapsed_h is None else round(float(elapsed_h), 2),
     }
+    if not replace and session_has_row(ledger, row["session"]):
+        return ledger
     keep = ledger[ledger["session"] != row["session"]]
     new = pd.DataFrame([row], columns=COLUMNS)
     if keep.empty:
@@ -124,16 +136,23 @@ def settle(ledger: pd.DataFrame, candles: pd.DataFrame) -> tuple[pd.DataFrame, i
     return ledger, settled_now
 
 
-def live_accuracy(ledger: pd.DataFrame, window: int = 30, min_n: int = 10) -> dict:
-    """Coverage of the P15-P85 bands over the last `window` settled sessions."""
+def live_accuracy(ledger: pd.DataFrame, window: int = 30, min_n: int = 10, late_after: float = 2.0) -> dict:
+    """Coverage of the P15-P85 bands over the last `window` settled sessions.
+
+    Also counts how many of those rows came from an on-time run (elapsed < `late_after` hours after the
+    open), from a mid-session run, or have no timing recorded (rows written before `elapsed_h` existed).
+    A mid-session forecast knows part of the day already, so the two kinds are not like for like."""
     s = ledger[ledger["settled"] == 1].sort_values("session").tail(window)
     n = len(s)
     if n == 0:
         return {"n": 0, "ready": False, "min_n": min_n, "close": np.nan, "high": np.nan,
-                "low": np.nan, "brier": np.nan}
+                "low": np.nan, "brier": np.nan, "n_ontime": 0, "n_late": 0, "n_unknown": 0}
+    elapsed = pd.to_numeric(s["elapsed_h"], errors="coerce") if "elapsed_h" in s else pd.Series(np.nan, index=s.index)
     brier = float(((s["p_up"] - s["up_actual"]) ** 2).mean())
     return {
         "n": n, "ready": n >= min_n, "min_n": min_n,
         "close": float(s["close_hit"].mean()), "high": float(s["high_hit"].mean()),
         "low": float(s["low_hit"].mean()), "brier": brier,
+        "n_ontime": int((elapsed < late_after).sum()), "n_late": int((elapsed >= late_after).sum()),
+        "n_unknown": int(elapsed.isna().sum()),
     }

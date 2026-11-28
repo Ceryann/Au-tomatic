@@ -63,11 +63,48 @@ def test_ledger_stores_no_prices_only_fractions_and_flags():
     assert led.iloc[0]["session"] == str(b.target_session.date())
 
 
-def test_rerun_for_the_same_session_replaces_the_row():
+def test_rerun_for_the_same_session_keeps_the_first_row_unless_replace_is_asked():
+    """GitHub starts the scheduled run hours late and the user may have run it by hand in the morning:
+    the live accuracy must keep the forecast made close to the open, not the last one."""
+    import dataclasses
     cfg, b, fc = _forecast()
-    led = upsert_forecast(empty_ledger(), fc, b, b.now_utc)
-    led = upsert_forecast(led, fc, b, b.now_utc + pd.Timedelta(minutes=20))
-    assert len(led) == 1 and led.iloc[0]["created_utc"].endswith("22:50Z")
+    led = upsert_forecast(empty_ledger(), fc, b, b.now_utc, elapsed_h=0.5)
+    later = b.now_utc + pd.Timedelta(hours=7)
+    kept = upsert_forecast(led, fc, b, later, elapsed_h=7.5)
+    assert len(kept) == 1 and kept.iloc[0]["created_utc"].endswith("22:30Z") and kept.iloc[0]["elapsed_h"] == 0.5
+    forced = upsert_forecast(led, fc, b, later, elapsed_h=7.5, replace=True)
+    assert len(forced) == 1 and forced.iloc[0]["created_utc"].endswith("05:30Z") and forced.iloc[0]["elapsed_h"] == 7.5
+    tomorrow = dataclasses.replace(b, target_session=b.target_session + pd.Timedelta(days=1))
+    both = upsert_forecast(led, fc, tomorrow, later, elapsed_h=0.5)
+    assert len(both) == 2, "a different session must still be added"
+
+
+def test_elapsed_hours_are_stored_and_old_ledgers_without_the_column_still_load():
+    cfg, b, fc = _forecast()
+    led = upsert_forecast(empty_ledger(), fc, b, b.now_utc, elapsed_h=0.504)
+    assert led.iloc[0]["elapsed_h"] == 0.5                                   # rounded to 2 decimals
+    assert np.isnan(upsert_forecast(empty_ledger(), fc, b, b.now_utc).iloc[0]["elapsed_h"])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "l.csv"
+        save_ledger(led, path)
+        assert load_ledger(path).iloc[0]["elapsed_h"] == 0.5
+        led.drop(columns=["elapsed_h"]).to_csv(path, index=False)            # a file written before the column existed
+        back = load_ledger(path)
+        assert list(back.columns) == COLUMNS and np.isnan(back.iloc[0]["elapsed_h"])
+
+
+def test_live_accuracy_counts_runs_by_timing():
+    elapsed = [0.5, 0.5, 6.0, 7.5, np.nan, 1.99]
+    rows = [{c: np.nan for c in COLUMNS} | {
+        "session": f"2026-01-{i + 1:02d}", "settled": 1, "close_hit": 1.0, "high_hit": 1.0, "low_hit": 1.0,
+        "p_up": 0.5, "up_actual": 1.0, "elapsed_h": e} for i, e in enumerate(elapsed)]
+    led = pd.DataFrame(rows)
+    acc = live_accuracy(led, window=30, min_n=3, late_after=2.0)
+    assert (acc["n_ontime"], acc["n_late"], acc["n_unknown"]) == (3, 2, 1) and acc["n"] == 6
+    acc = live_accuracy(led, window=30, min_n=3, late_after=7.0)
+    assert (acc["n_ontime"], acc["n_late"], acc["n_unknown"]) == (4, 1, 1)
+    none = live_accuracy(empty_ledger(), 30, 10)
+    assert (none["n_ontime"], none["n_late"], none["n_unknown"]) == (0, 0, 0)
 
 
 # ------------------------------------------------------------------ settlement
@@ -206,6 +243,29 @@ def test_two_day_flow_records_then_settles_and_reports_accuracy():
         first = led.sort_values("session").iloc[0]
         assert first["settled"] == 1 and first["close_hit"] in (0.0, 1.0)
         assert "Akurasi live: mengumpulkan data (1/10 hari)" in _text_of_last_mail()
+
+
+def test_main_keeps_the_on_time_row_when_a_late_run_follows_unless_replace_is_given():
+    hourly = T.hourly_until(T.utc("2026-01-14 05:30"), seed=11)
+    with tempfile.TemporaryDirectory() as tmp:
+        led_path = str(Path(tmp) / "ledger.csv")
+        base = ["--no-macro", "--no-news", "--ledger", led_path]
+
+        assert _run_main(["--now", "2026-01-13T22:30:00Z"] + base, hourly) == 0          # the morning run
+        row = load_ledger(led_path).iloc[0]
+        assert row["created_utc"] == "2026-01-13T22:30Z" and row["elapsed_h"] == 0.5
+
+        T._FakeSMTP.last = {}
+        assert _run_main(["--now", "2026-01-14T05:30:00Z"] + base, hourly) == 0          # same session, 7 h later
+        led = load_ledger(led_path)
+        assert len(led) == 1 and led.iloc[0]["created_utc"] == "2026-01-13T22:30Z", "the on-time row must survive"
+        assert led.iloc[0]["elapsed_h"] == 0.5
+        assert T._FakeSMTP.last["recipients"], "the late run still sends its email"
+        assert "Run terlambat" in _text_of_last_mail()
+
+        assert _run_main(["--now", "2026-01-14T05:30:00Z", "--replace-ledger"] + base, hourly) == 0
+        led = load_ledger(led_path)
+        assert len(led) == 1 and led.iloc[0]["created_utc"] == "2026-01-14T05:30Z" and led.iloc[0]["elapsed_h"] == 7.5
 
 
 def test_a_broken_ledger_never_blocks_the_email():

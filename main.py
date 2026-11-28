@@ -42,9 +42,10 @@ from src.email_dispatcher import (
     gmail_api_missing,
     send_email,
     send_email_gmail_api,
+    run_timing,
     summarize_recipients,
 )
-from src.ledger import live_accuracy, load_ledger, save_ledger, settle, upsert_forecast
+from src.ledger import live_accuracy, load_ledger, save_ledger, session_has_row, settle, upsert_forecast
 from src.news_sentinel import build_news_report
 from src.quant_engine import forecast_day
 
@@ -85,6 +86,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-news", action="store_true", help="Skip the calendar and news radar.")
     p.add_argument("--no-ledger", action="store_true", help="Do not read or write the forecast ledger.")
     p.add_argument("--ledger", default=None, help="Ledger CSV path (default from config.yaml).")
+    p.add_argument("--replace-ledger", action="store_true",
+                   help="Overwrite the ledger row of this session even if an earlier run already recorded one "
+                        "(by default the first run of a session is kept).")
     return p.parse_args(argv)
 
 
@@ -125,7 +129,8 @@ def main(argv=None) -> int:
                 try:  # the ledger is a bonus: it must never block the forecast email
                     ledger = load_ledger(ledger_path)
                     ledger, n_set = settle(ledger, bundle.candles)
-                    accuracy = live_accuracy(ledger, cfg["ledger"]["window"], cfg["ledger"]["min_n"])
+                    accuracy = live_accuracy(ledger, cfg["ledger"]["window"], cfg["ledger"]["min_n"],
+                                             late_after=float(cfg["email"].get("late_run_hours", 2.0)))
                     log.info("Ledger: %d rows, settled %d new, live n=%d", len(ledger), n_set, accuracy["n"])
                 except Exception as exc:  # noqa: BLE001
                     ledger = None
@@ -229,7 +234,14 @@ def main(argv=None) -> int:
             failed = True
         if ok and fc is not None and ledger is not None:        # record only what was actually sent
             try:
-                save_ledger(upsert_forecast(ledger, fc, bundle, bundle.now_utc, event_flag=event_flag), ledger_path)
+                session_label = bundle.target_session.strftime("%Y-%m-%d")
+                timing = run_timing(bundle, fc, cfg)
+                elapsed = timing["elapsed_h"] if timing else None
+                if session_has_row(ledger, session_label) and not args.replace_ledger:
+                    log.info("Ledger: session %s already has a row from an earlier run; kept it "
+                             "(--replace-ledger overwrites).", session_label)
+                save_ledger(upsert_forecast(ledger, fc, bundle, bundle.now_utc, event_flag=event_flag,
+                                            elapsed_h=elapsed, replace=args.replace_ledger), ledger_path)
                 log.info("Ledger updated.")
             except Exception as exc:  # noqa: BLE001
                 log.warning("Ledger not saved (%s: %s).", type(exc).__name__, exc)
